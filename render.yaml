@@ -37,4 +37,5 @@ services:
 
   - type: keyvalue
     name: video-file-editor-redis
+    ipAllowList: []
     plan: free
