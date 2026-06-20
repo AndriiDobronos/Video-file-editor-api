@@ -97,25 +97,41 @@ export async function registerMediaRoutes(
   });
 
   app.post("/api/v1/uploads", async (request, reply) => {
-    const createdAssets = [];
+    try {
+      const createdAssets = [];
 
-    for await (const part of request.parts()) {
-      if (part.type !== "file") {
-        continue;
+      for await (const part of request.parts()) {
+        if (part.type !== "file") {
+          continue;
+        }
+
+        createdAssets.push(toAssetDto(await saveIncomingUpload(deps.redis, part)));
       }
 
-      createdAssets.push(toAssetDto(await saveIncomingUpload(deps.redis, part)));
-    }
+      if (createdAssets.length === 0) {
+        return reply.code(400).send({
+          message: "Upload at least one media file.",
+        });
+      }
 
-    if (createdAssets.length === 0) {
-      return reply.code(400).send({
-        message: "Upload at least one media file.",
+      return reply.code(201).send({
+        items: createdAssets,
+      });
+    } catch (error) {
+      request.log.error(
+        {
+          error,
+        },
+        "Upload failed.",
+      );
+
+      return reply.code(500).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Upload failed while writing to object storage.",
       });
     }
-
-    return reply.code(201).send({
-      items: createdAssets,
-    });
   });
 
   app.get("/api/v1/jobs", async () => {

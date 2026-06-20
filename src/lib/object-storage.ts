@@ -5,6 +5,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -14,6 +15,15 @@ import { serverConfig } from "../config.js";
 import type { MediaAssetKind, MediaStorageDriver, StoredMediaAsset } from "../types.js";
 
 let objectStorageClient: S3Client | null = null;
+
+export type ObjectStorageHealth = {
+  status: "ok" | "error" | "skipped";
+  storageDriver: MediaStorageDriver;
+  bucket: string | null;
+  endpoint: string | null;
+  message: string | null;
+  checkedAt: string;
+};
 
 function getConfiguredStorageDriver(): MediaStorageDriver {
   const value = (process.env.MEDIA_STORAGE_DRIVER ?? "local").toLowerCase();
@@ -65,6 +75,29 @@ function getObjectStorageClient() {
   return objectStorageClient;
 }
 
+function getObjectStorageEndpoint() {
+  if (!isR2StorageEnabled()) {
+    return null;
+  }
+
+  const config = getRequiredR2Config();
+  return `https://${config.accountId}.r2.cloudflarestorage.com`;
+}
+
+function toStorageErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    const statusCode = "statusCode" in error ? String(error.statusCode) : null;
+    const errorCode = "Code" in error ? String(error.Code) : null;
+    const pieces = [error.name, errorCode, statusCode].filter(Boolean);
+
+    return pieces.length > 0
+      ? `${error.message} (${pieces.join("/")})`
+      : error.message;
+  }
+
+  return "Unknown object storage error.";
+}
+
 export function getMediaStorageDriver() {
   return getConfiguredStorageDriver();
 }
@@ -79,6 +112,62 @@ export function assertObjectStorageReady() {
   }
 
   getRequiredR2Config();
+}
+
+export async function checkObjectStorageHealth(): Promise<ObjectStorageHealth> {
+  const checkedAt = new Date().toISOString();
+  const storageDriver = getMediaStorageDriver();
+
+  if (storageDriver === "local") {
+    return {
+      status: "skipped",
+      storageDriver,
+      bucket: null,
+      endpoint: null,
+      message: "Object storage health check skipped because MEDIA_STORAGE_DRIVER=local.",
+      checkedAt,
+    };
+  }
+
+  const client = getObjectStorageClient();
+  const config = getRequiredR2Config();
+  const key = `healthchecks/${randomUUID()}.txt`;
+
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: config.bucket,
+        Key: key,
+        Body: `object storage health check ${checkedAt}`,
+        ContentType: "text/plain; charset=utf-8",
+      }),
+    );
+
+    await client.send(
+      new DeleteObjectCommand({
+        Bucket: config.bucket,
+        Key: key,
+      }),
+    );
+
+    return {
+      status: "ok",
+      storageDriver,
+      bucket: config.bucket,
+      endpoint: getObjectStorageEndpoint(),
+      message: null,
+      checkedAt,
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      storageDriver,
+      bucket: config.bucket,
+      endpoint: getObjectStorageEndpoint(),
+      message: toStorageErrorMessage(error),
+      checkedAt,
+    };
+  }
 }
 
 export function buildObjectStorageKey(kind: MediaAssetKind, storedName: string) {

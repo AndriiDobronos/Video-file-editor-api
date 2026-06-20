@@ -3,7 +3,12 @@ import type { Queue } from "bullmq";
 import Fastify from "fastify";
 import type { Redis } from "ioredis";
 import { ensureStorageDirectories } from "./lib/filesystem.js";
-import { assertObjectStorageReady, getMediaStorageDriver } from "./lib/object-storage.js";
+import {
+  assertObjectStorageReady,
+  checkObjectStorageHealth,
+  getMediaStorageDriver,
+  type ObjectStorageHealth,
+} from "./lib/object-storage.js";
 import { registerMediaRoutes } from "./routes/media-routes.js";
 import type { QueueJobData, QueueJobResult } from "./types.js";
 
@@ -15,12 +20,51 @@ type BuildAppOptions = {
 };
 
 export async function buildApp(options: BuildAppOptions) {
-  await ensureStorageDirectories();
-  assertObjectStorageReady();
-
   const app = Fastify({
     logger: true,
   });
+
+  await ensureStorageDirectories();
+  assertObjectStorageReady();
+
+  let objectStorageHealth: ObjectStorageHealth | null = null;
+
+  try {
+    objectStorageHealth = await checkObjectStorageHealth();
+
+    if (objectStorageHealth.status === "error") {
+      app.log.error(
+        {
+          objectStorage: objectStorageHealth,
+        },
+        "Object storage health check failed.",
+      );
+    } else {
+      app.log.info(
+        {
+          objectStorage: objectStorageHealth,
+        },
+        "Object storage health check completed.",
+      );
+    }
+  } catch (error) {
+    objectStorageHealth = {
+      status: "error",
+      storageDriver: getMediaStorageDriver(),
+      bucket: null,
+      endpoint: null,
+      message: error instanceof Error ? error.message : "Unexpected object storage failure.",
+      checkedAt: new Date().toISOString(),
+    };
+
+    app.log.error(
+      {
+        error,
+        objectStorage: objectStorageHealth,
+      },
+      "Unexpected object storage health check error.",
+    );
+  }
 
   await app.register(cors, {
     origin: options.origin ?? true,
@@ -33,10 +77,17 @@ export async function buildApp(options: BuildAppOptions) {
       .catch(() => "error");
 
     return {
-      status: redisStatus === "ok" ? "ok" : "degraded",
+      status:
+        redisStatus === "ok" && objectStorageHealth?.status !== "error"
+          ? "ok"
+          : "degraded",
       service: "video-file-editor-api",
       redis: redisStatus,
       storageDriver: getMediaStorageDriver(),
+      objectStorage: objectStorageHealth?.status ?? "unknown",
+      objectStorageBucket: objectStorageHealth?.bucket ?? null,
+      objectStorageMessage: objectStorageHealth?.message ?? null,
+      objectStorageCheckedAt: objectStorageHealth?.checkedAt ?? null,
       workerMode: options.workerMode ?? "external",
       timestamp: new Date().toISOString(),
     };
