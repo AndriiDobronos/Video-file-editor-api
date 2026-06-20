@@ -200,6 +200,18 @@ export async function uploadLocalFileToR2(input: {
   );
 }
 
+export async function deleteR2Object(objectKey: string) {
+  const client = getObjectStorageClient();
+  const config = getRequiredR2Config();
+
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: config.bucket,
+      Key: objectKey,
+    }),
+  );
+}
+
 export async function downloadR2ObjectToLocalFile(input: {
   objectKey: string;
   localFilePath: string;

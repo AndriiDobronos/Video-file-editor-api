@@ -12,6 +12,7 @@ import {
   buildObjectStorageKey,
   buildTemporaryWorkingFilePath,
   cleanupTemporaryFile,
+  deleteR2Object,
   ensureWorkingDirectory,
   getMediaStorageDriver,
   uploadLocalFileToR2,
@@ -185,5 +186,22 @@ export async function listAssetDtos(redis: Redis): Promise<MediaAssetDto[]> {
 
 export async function getAssetDto(redis: Redis, assetId: string) {
   const asset = await getAssetOrThrow(redis, assetId);
+  return toAssetDto(asset);
+}
+
+export async function deleteAsset(redis: Redis, assetId: string) {
+  const asset = await getAssetOrThrow(redis, assetId);
+
+  if (asset.storageDriver === "r2") {
+    await deleteR2Object(asset.storageKey);
+  } else {
+    await cleanupTemporaryFile(asset.filePath);
+  }
+
+  await Promise.all([
+    redis.del(getAssetRecordKey(assetId)),
+    redis.zrem(serverConfig.redisKeys.assetIndex, assetId),
+  ]);
+
   return toAssetDto(asset);
 }

@@ -5,9 +5,11 @@ import { serverConfig } from "../config.js";
 import type {
   JobProgress,
   MergeJobOptions,
+  NormalizeJobOptions,
   ProcessingJob,
   QueueJobData,
   QueueJobResult,
+  StoredMediaAsset,
   TrimJobOptions,
 } from "../types.js";
 import { getAssetOrThrow } from "./filesystem.js";
@@ -73,6 +75,76 @@ function createQueuedJobRecord(
     progress: 0,
     options,
   };
+}
+
+type MergeCompatibilityCheck = {
+  label: string;
+  readValue: (asset: StoredMediaAsset) => string;
+};
+
+const mergeCompatibilityChecks: MergeCompatibilityCheck[] = [
+  {
+    label: "resolution",
+    readValue: (asset) => {
+      const width = asset.metadata?.width;
+      const height = asset.metadata?.height;
+
+      return width && height ? `${width}x${height}` : "unknown";
+    },
+  },
+  {
+    label: "video codec",
+    readValue: (asset) => asset.metadata?.videoCodec ?? "unknown",
+  },
+  {
+    label: "audio codec",
+    readValue: (asset) => asset.metadata?.audioCodec ?? "unknown",
+  },
+  {
+    label: "frame rate",
+    readValue: (asset) => asset.metadata?.frameRate ?? "unknown",
+  },
+  {
+    label: "audio sample rate",
+    readValue: (asset) =>
+      asset.metadata?.audioSampleRate ? `${asset.metadata.audioSampleRate} Hz` : "unknown",
+  },
+  {
+    label: "audio channels",
+    readValue: (asset) =>
+      asset.metadata?.audioChannels ? String(asset.metadata.audioChannels) : "unknown",
+  },
+];
+
+function validateMergeSourceAssets(sourceAssets: StoredMediaAsset[]) {
+  const issues = mergeCompatibilityChecks.flatMap((check) => {
+    const values = new Map<string, string[]>();
+
+    for (const asset of sourceAssets) {
+      const value = check.readValue(asset);
+      const assetLabels = values.get(value) ?? [];
+      assetLabels.push(asset.originalName);
+      values.set(value, assetLabels);
+    }
+
+    if (values.size <= 1) {
+      return [];
+    }
+
+    return [
+      `${check.label}: ${Array.from(values.entries())
+        .map(([value, assets]) => `${value} (${assets.join(", ")})`)
+        .join("; ")}`,
+    ];
+  });
+
+  if (issues.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `Merge source assets are incompatible. Normalize the clips to the same format before merging. Conflicting settings: ${issues.join(" | ")}.`,
+  );
 }
 
 export async function listJobDtos(redis: Redis) {
@@ -153,9 +225,10 @@ export async function createMergeJob(
     throw new Error("Merge requires at least two source assets.");
   }
 
-  await Promise.all(
+  const sourceAssets = await Promise.all(
     options.sourceAssetIds.map((assetId) => getAssetOrThrow(redis, assetId)),
   );
+  validateMergeSourceAssets(sourceAssets);
 
   const sourceAssetIds = [...options.sourceAssetIds];
   const job = createQueuedJobRecord("merge", sourceAssetIds, {
@@ -173,6 +246,50 @@ export async function createMergeJob(
         options: {
           sourceAssetIds,
         },
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createNormalizeJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: NormalizeJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!sourceAsset.metadata?.videoCodec) {
+    throw new Error("Normalize currently requires a video asset with a video stream.");
+  }
+
+  if (options.target.width % 2 !== 0 || options.target.height % 2 !== 0) {
+    throw new Error("Normalize target width and height must be even numbers.");
+  }
+
+  const job = createQueuedJobRecord("normalize", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "normalize",
+      {
+        jobId: job.id,
+        type: "normalize",
+        sourceAssetIds: [options.assetId],
+        options,
       },
       {
         jobId: job.id,

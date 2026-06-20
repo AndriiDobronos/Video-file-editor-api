@@ -1,7 +1,7 @@
 export type MediaAssetKind = "upload" | "output";
 export type MediaStorageDriver = "local" | "r2";
 
-export type JobType = "trim" | "merge";
+export type JobType = "trim" | "merge" | "normalize";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
 
@@ -49,6 +49,28 @@ export type MergeJobOptions = {
   sourceAssetIds: string[];
 };
 
+export type NormalizeTargetPreset =
+  | "hd-720p"
+  | "match-largest"
+  | "match-smallest"
+  | "match-average";
+
+export type NormalizeTargetProfile = {
+  preset: NormalizeTargetPreset;
+  width: number;
+  height: number;
+  frameRate: number;
+  audioSampleRate: number;
+  audioChannels: number;
+  videoCodec: "h264";
+  audioCodec: "aac";
+};
+
+export type NormalizeJobOptions = {
+  assetId: string;
+  target: NormalizeTargetProfile;
+};
+
 export type JobProgress = string | boolean | number | object | null;
 
 export type ProcessingJob = {
@@ -62,14 +84,14 @@ export type ProcessingJob = {
   createdAt: string;
   updatedAt: string;
   progress: JobProgress;
-  options: TrimJobOptions | MergeJobOptions;
+  options: TrimJobOptions | MergeJobOptions | NormalizeJobOptions;
 };
 
 export type QueueJobData = {
   jobId: string;
   type: JobType;
   sourceAssetIds: string[];
-  options: TrimJobOptions | MergeJobOptions;
+  options: TrimJobOptions | MergeJobOptions | NormalizeJobOptions;
 };
 
 export type QueueJobResult = {

@@ -7,6 +7,7 @@ import type {
   JobProgress,
   MediaMetadata,
   MergeJobOptions,
+  NormalizeJobOptions,
   StoredMediaAsset,
   TrimJobOptions,
 } from "../types.js";
@@ -153,6 +154,15 @@ function buildMergeOutputName() {
   return `merged-${new Date().toISOString().replace(/[:.]/g, "-")}.mp4`;
 }
 
+function buildNormalizedOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: NormalizeJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "normalized-video";
+  return `${baseName}-normalized-${options.target.width}x${options.target.height}.mp4`;
+}
+
 export async function processTrimJob(
   redis: Redis,
   options: TrimJobOptions,
@@ -196,6 +206,75 @@ export async function processTrimJob(
     const outputAsset = await registerOutputAsset(redis, {
       filePath: outputFilePath,
       originalName: buildTrimOutputName(sourceAsset),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processNormalizeJob(
+  redis: Redis,
+  options: NormalizeJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath("normalized");
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "normalize-sources",
+  );
+  const scaleFilter =
+    `scale=${options.target.width}:${options.target.height}:force_original_aspect_ratio=decrease,` +
+    `pad=${options.target.width}:${options.target.height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    await runCommand("ffmpeg", [
+      "-y",
+      "-i",
+      stagedSourceAsset.localFilePath,
+      "-map",
+      "0:v:0?",
+      "-map",
+      "0:a:0?",
+      "-vf",
+      scaleFilter,
+      "-r",
+      `${options.target.frameRate}`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-ar",
+      `${options.target.audioSampleRate}`,
+      "-ac",
+      `${options.target.audioChannels}`,
+      "-movflags",
+      "+faststart",
+      outputFilePath,
+    ]);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildNormalizedOutputName(sourceAsset, options),
     });
 
     await reportProgress(onProgress, 100);

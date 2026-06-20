@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 import {
+  deleteAsset,
   getAssetDto,
   getAssetOrThrow,
   listAssetDtos,
@@ -12,6 +13,7 @@ import {
 } from "../lib/filesystem.js";
 import {
   createMergeJob,
+  createNormalizeJob,
   createTrimJob,
   getJobDto,
   listJobDtos,
@@ -28,6 +30,25 @@ const trimJobSchema = z.object({
 
 const mergeJobSchema = z.object({
   sourceAssetIds: z.array(z.string().min(1)).min(2),
+});
+
+const normalizeJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    preset: z.enum([
+      "hd-720p",
+      "match-largest",
+      "match-smallest",
+      "match-average",
+    ]),
+    width: z.number().int().min(2).multipleOf(2),
+    height: z.number().int().min(2).multipleOf(2),
+    frameRate: z.number().positive(),
+    audioSampleRate: z.number().int().positive(),
+    audioChannels: z.number().int().positive(),
+    videoCodec: z.literal("h264"),
+    audioCodec: z.literal("aac"),
+  }),
 });
 
 type MediaRouteDependencies = {
@@ -88,6 +109,25 @@ export async function registerMediaRoutes(
       return reply.send(createReadStream(asset.filePath));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Asset was not found.";
+      const statusCode = message.includes("was not found") ? 404 : 500;
+
+      return reply.code(statusCode).send({
+        message,
+      });
+    }
+  });
+
+  app.delete("/api/v1/assets/:assetId", async (request, reply) => {
+    try {
+      const params = request.params as { assetId: string };
+      const asset = await deleteAsset(deps.redis, params.assetId);
+
+      return reply.send({
+        item: asset,
+        message: `Asset "${asset.originalName}" was deleted.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Asset could not be deleted.";
       const statusCode = message.includes("was not found") ? 404 : 500;
 
       return reply.code(statusCode).send({
@@ -196,6 +236,30 @@ export async function registerMediaRoutes(
     } catch (error) {
       return reply.code(400).send({
         message: error instanceof Error ? error.message : "Merge job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/normalize", async (request, reply) => {
+    const parsedBody = normalizeJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Normalize payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createNormalizeJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Normalize job could not be queued.",
       });
     }
   });

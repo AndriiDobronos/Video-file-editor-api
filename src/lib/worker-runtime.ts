@@ -9,11 +9,12 @@ import {
   markJobProcessing,
   updateJobProgress,
 } from "./jobs.js";
-import { processMergeJob, processTrimJob } from "./media.js";
+import { processMergeJob, processNormalizeJob, processTrimJob } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
   JobProgress,
   MergeJobOptions,
+  NormalizeJobOptions,
   QueueJobResult,
   TrimJobOptions,
 } from "../types.js";
@@ -52,6 +53,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processMergeJob(
           redis,
           job.data.options as MergeJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "normalize") {
+        const outputAsset = await processNormalizeJob(
+          redis,
+          job.data.options as NormalizeJobOptions,
           reportProgress,
         );
 
