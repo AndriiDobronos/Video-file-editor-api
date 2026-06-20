@@ -1,0 +1,7 @@
+node_modules
+dist
+storage
+.env
+.env.example
+npm-debug.log*
+dump.rdb

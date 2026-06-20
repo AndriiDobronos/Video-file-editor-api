@@ -1,0 +1,12 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: video-file-editor-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:

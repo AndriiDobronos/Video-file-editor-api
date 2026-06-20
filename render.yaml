@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: video-file-editor-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HOST
+        value: 0.0.0.0
+      - key: MEDIA_STORAGE_DRIVER
+        value: r2
+      - key: EMBED_WORKER
+        value: "true"
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: video-file-editor-redis
+          property: connectionString
+      - key: CORS_ORIGIN
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: R2_SIGNED_URL_TTL_SECONDS
+        value: "3600"
+
+  - type: keyvalue
+    name: video-file-editor-redis
+    plan: free
