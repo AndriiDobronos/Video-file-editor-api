@@ -68,6 +68,8 @@ export async function buildApp(options: BuildAppOptions) {
 
   await app.register(cors, {
     origin: options.origin ?? true,
+    methods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Accept", "Authorization"],
   });
 
   const buildServiceSnapshot = async () => {
