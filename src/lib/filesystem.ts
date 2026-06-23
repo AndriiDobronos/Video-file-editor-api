@@ -7,12 +7,14 @@ import type { MultipartFile } from "@fastify/multipart";
 import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
 import type { MediaAssetDto, MediaStorageDriver, StoredMediaAsset } from "../types.js";
+import { buildAssetThumbnailUrl, isPreviewableAsset } from "./asset-media.js";
 import { generateThumbnailPreview, probeMedia } from "./media.js";
 import {
   buildObjectStorageKey,
   buildThumbnailStorageKey,
   buildTemporaryWorkingFilePath,
   cleanupTemporaryFile,
+  downloadR2ObjectToLocalFile,
   deleteR2Object,
   ensureWorkingDirectory,
   getMediaStorageDriver,
@@ -65,9 +67,16 @@ async function createStoredAssetThumbnail(input: {
   localFilePath: string;
   storedName: string;
   storageDriver: MediaStorageDriver;
+  mimeType: string;
   metadata: StoredMediaAsset["metadata"];
 }) {
-  if (!input.metadata?.videoCodec) {
+  if (
+    !isPreviewableAsset({
+      mimeType: input.mimeType,
+      fileName: input.storedName,
+      metadata: input.metadata,
+    })
+  ) {
     return {
       thumbnailStorageKey: null,
       thumbnailMimeType: null,
@@ -145,6 +154,7 @@ async function persistStoredAsset(input: {
     localFilePath: input.localFilePath,
     storedName: input.storedName,
     storageDriver,
+    mimeType: input.mimeType,
     metadata,
   });
 
@@ -168,8 +178,12 @@ async function persistStoredAsset(input: {
   };
 
   asset.downloadUrl = `/api/v1/assets/${asset.id}/download`;
-  asset.thumbnailUrl = asset.thumbnailStorageKey
-    ? `/api/v1/assets/${asset.id}/thumbnail`
+  asset.thumbnailUrl = isPreviewableAsset({
+    mimeType: asset.mimeType,
+    fileName: asset.originalName,
+    metadata: asset.metadata,
+  })
+    ? buildAssetThumbnailUrl(asset.id)
     : null;
   const createdAtScore = Date.parse(asset.createdAt) || Date.now();
 
@@ -252,6 +266,80 @@ export async function getAssetOrThrow(redis: Redis, assetId: string) {
   }
 
   return asset;
+}
+
+export async function ensureAssetThumbnail(
+  redis: Redis,
+  asset: StoredMediaAsset,
+): Promise<StoredMediaAsset> {
+  if (
+    !isPreviewableAsset({
+      mimeType: asset.mimeType,
+      fileName: asset.originalName,
+      metadata: asset.metadata,
+    })
+  ) {
+    return asset;
+  }
+
+  if (asset.thumbnailMimeType && (asset.thumbnailStorageKey || asset.thumbnailFilePath)) {
+    if (asset.thumbnailUrl) {
+      return asset;
+    }
+
+    const assetWithRoute: StoredMediaAsset = {
+      ...asset,
+      thumbnailUrl: buildAssetThumbnailUrl(asset.id),
+    };
+
+    await setJsonRecord(redis, getAssetRecordKey(asset.id), assetWithRoute);
+    return assetWithRoute;
+  }
+
+  const stagedOriginalFilePath =
+    asset.storageDriver === "local"
+      ? asset.filePath
+      : buildTemporaryWorkingFilePath("asset-thumbnail-sources", asset.storedName);
+
+  if (!stagedOriginalFilePath) {
+    throw new Error(`Asset "${asset.id}" is missing its local file path.`);
+  }
+
+  if (asset.storageDriver === "r2") {
+    await downloadR2ObjectToLocalFile({
+      objectKey: asset.storageKey,
+      localFilePath: stagedOriginalFilePath,
+    });
+  }
+
+  try {
+    const thumbnail = await createStoredAssetThumbnail({
+      localFilePath: stagedOriginalFilePath,
+      storedName: asset.storedName,
+      storageDriver: asset.storageDriver,
+      mimeType: asset.mimeType,
+      metadata: asset.metadata,
+    });
+
+    if (!thumbnail.thumbnailMimeType || (!thumbnail.thumbnailStorageKey && !thumbnail.thumbnailFilePath)) {
+      return asset;
+    }
+
+    const nextAsset: StoredMediaAsset = {
+      ...asset,
+      thumbnailStorageKey: thumbnail.thumbnailStorageKey,
+      thumbnailMimeType: thumbnail.thumbnailMimeType,
+      thumbnailFilePath: thumbnail.thumbnailFilePath,
+      thumbnailUrl: buildAssetThumbnailUrl(asset.id),
+    };
+
+    await setJsonRecord(redis, getAssetRecordKey(asset.id), nextAsset);
+    return nextAsset;
+  } finally {
+    if (asset.storageDriver === "r2") {
+      await cleanupTemporaryFile(stagedOriginalFilePath);
+    }
+  }
 }
 
 export async function listAssetDtos(redis: Redis): Promise<MediaAssetDto[]> {

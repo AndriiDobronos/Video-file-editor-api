@@ -1,3 +1,4 @@
+import { buildAssetThumbnailUrl, isPreviewableAsset } from "./asset-media.js";
 import type { MediaAssetDto, ProcessingJob, StoredMediaAsset } from "../types.js";
 
 export function toAssetDto(asset: StoredMediaAsset): MediaAssetDto {
@@ -11,9 +12,13 @@ export function toAssetDto(asset: StoredMediaAsset): MediaAssetDto {
     sizeBytes: asset.sizeBytes,
     createdAt: asset.createdAt,
     downloadUrl: asset.downloadUrl || `/api/v1/assets/${asset.id}/download`,
-    thumbnailUrl:
-      asset.thumbnailUrl ??
-      (asset.thumbnailStorageKey ? `/api/v1/assets/${asset.id}/thumbnail` : null),
+    thumbnailUrl: isPreviewableAsset({
+      mimeType: asset.mimeType,
+      fileName: asset.originalName,
+      metadata: asset.metadata,
+    })
+      ? asset.thumbnailUrl ?? buildAssetThumbnailUrl(asset.id)
+      : null,
     metadata: asset.metadata,
   };
 }

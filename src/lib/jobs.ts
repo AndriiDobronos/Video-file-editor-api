@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
+import { resolveSupportedImageFormat } from "./asset-media.js";
 import type {
+  ConvertImageJobOptions,
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -288,6 +290,60 @@ export async function createNormalizeJob(
       {
         jobId: job.id,
         type: "normalize",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createConvertImageJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: ConvertImageJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const sourceFormat = resolveSupportedImageFormat({
+    mimeType: sourceAsset.mimeType,
+    fileName: sourceAsset.originalName,
+  });
+
+  if (!sourceFormat) {
+    throw new Error(`Asset "${sourceAsset.id}" is not a supported image source.`);
+  }
+
+  if (
+    sourceFormat === options.target.format &&
+    options.target.width === undefined &&
+    options.target.height === undefined
+  ) {
+    throw new Error(
+      "Convert job would not change the file. Choose another format or resize target.",
+    );
+  }
+
+  const job = createQueuedJobRecord("convert-image", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "convert-image",
+      {
+        jobId: job.id,
+        type: "convert-image",
         sourceAssetIds: [options.assetId],
         options,
       },

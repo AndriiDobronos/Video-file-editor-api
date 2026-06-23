@@ -3,7 +3,12 @@ import { unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
+import {
+  getTargetImageExtension,
+  getTargetImageMimeType,
+} from "./asset-media.js";
 import type {
+  ConvertImageJobOptions,
   JobProgress,
   MediaMetadata,
   MergeJobOptions,
@@ -50,8 +55,8 @@ function parseNumber(value: string | number | undefined) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function buildOutputFilePath(prefix: string) {
-  return path.join(serverConfig.outputsDir, `${prefix}-${randomUUID()}.mp4`);
+function buildOutputFilePath(prefix: string, extension = ".mp4") {
+  return path.join(serverConfig.outputsDir, `${prefix}-${randomUUID()}${extension}`);
 }
 
 export async function generateThumbnailPreview(
@@ -65,6 +70,8 @@ export async function generateThumbnailPreview(
     "-vf",
     "thumbnail,scale='min(320,iw)':-2",
     "-frames:v",
+    "1",
+    "-update",
     "1",
     "-q:v",
     "3",
@@ -181,6 +188,60 @@ function buildNormalizedOutputName(
   return `${baseName}-normalized-${options.target.width}x${options.target.height}.mp4`;
 }
 
+function buildConvertedImageOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: ConvertImageJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "converted-image";
+
+  return `${baseName}-converted${getTargetImageExtension(options.target.format)}`;
+}
+
+function getConvertImageQuality(options: ConvertImageJobOptions) {
+  return Math.max(1, Math.min(100, Math.round(options.target.quality ?? 92)));
+}
+
+function getJpegQValue(quality: number) {
+  return Math.max(2, Math.min(31, Math.round(31 - ((quality - 1) * 29) / 99)));
+}
+
+function getFilterBackgroundColor(options: ConvertImageJobOptions) {
+  if (options.target.background) {
+    return `0x${options.target.background.replace(/^#/, "")}`;
+  }
+
+  return options.target.format === "jpeg" ? "0xFFFFFF" : "black@0";
+}
+
+function buildConvertImageFilter(options: ConvertImageJobOptions) {
+  const { width, height } = options.target;
+  const fit = options.target.fit ?? "contain";
+  const filters: string[] = [];
+
+  if (width && height) {
+    if (fit === "stretch") {
+      filters.push(`scale=${width}:${height}`);
+    } else if (fit === "cover") {
+      filters.push(`scale=${width}:${height}:force_original_aspect_ratio=increase`);
+      filters.push(`crop=${width}:${height}`);
+    } else {
+      filters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease`);
+      filters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${getFilterBackgroundColor(options)}`);
+    }
+  } else if (width) {
+    filters.push(`scale=${width}:-2`);
+  } else if (height) {
+    filters.push(`scale=-2:${height}`);
+  }
+
+  if (options.target.format === "jpeg") {
+    filters.push("format=yuv420p");
+  }
+
+  return filters.length > 0 ? filters.join(",") : null;
+}
+
 export async function processTrimJob(
   redis: Redis,
   options: TrimJobOptions,
@@ -293,6 +354,71 @@ export async function processNormalizeJob(
     const outputAsset = await registerOutputAsset(redis, {
       filePath: outputFilePath,
       originalName: buildNormalizedOutputName(sourceAsset, options),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processConvertImageJob(
+  redis: Redis,
+  options: ConvertImageJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath(
+    "converted-image",
+    getTargetImageExtension(options.target.format),
+  );
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "convert-image-sources",
+  );
+  const filter = buildConvertImageFilter(options);
+  const quality = getConvertImageQuality(options);
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = ["-y", "-i", stagedSourceAsset.localFilePath];
+
+    if (filter) {
+      ffmpegArgs.push("-vf", filter);
+    }
+
+    ffmpegArgs.push("-frames:v", "1");
+
+    if (options.target.format === "png") {
+      ffmpegArgs.push("-c:v", "png", "-update", "1");
+    }
+
+    if (options.target.format === "jpeg") {
+      ffmpegArgs.push("-update", "1", "-q:v", `${getJpegQValue(quality)}`);
+    }
+
+    if (options.target.format === "webp") {
+      ffmpegArgs.push("-c:v", "libwebp", "-quality", `${quality}`);
+    }
+
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildConvertedImageOutputName(sourceAsset, options),
+      mimeType: getTargetImageMimeType(options.target.format),
     });
 
     await reportProgress(onProgress, 100);

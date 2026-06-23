@@ -6,12 +6,14 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 import {
   deleteAsset,
+  ensureAssetThumbnail,
   getAssetDto,
   getAssetOrThrow,
   listAssetDtos,
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  createConvertImageJob,
   createMergeJob,
   createNormalizeJob,
   createTrimJob,
@@ -51,6 +53,18 @@ const normalizeJobSchema = z.object({
     audioChannels: z.number().int().positive(),
     videoCodec: z.literal("h264"),
     audioCodec: z.literal("aac"),
+  }),
+});
+
+const convertImageJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    format: z.enum(["png", "jpeg", "webp"]),
+    quality: z.number().int().min(1).max(100).optional(),
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
+    fit: z.enum(["contain", "cover", "stretch"]).optional(),
+    background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   }),
 });
 
@@ -123,7 +137,11 @@ export async function registerMediaRoutes(
   app.get("/api/v1/assets/:assetId/thumbnail", async (request, reply) => {
     try {
       const params = request.params as { assetId: string };
-      const asset = await getAssetOrThrow(deps.redis, params.assetId);
+      let asset = await getAssetOrThrow(deps.redis, params.assetId);
+
+      if (!asset.thumbnailMimeType || (!asset.thumbnailStorageKey && !asset.thumbnailFilePath)) {
+        asset = await ensureAssetThumbnail(deps.redis, asset);
+      }
 
       if (!asset.thumbnailMimeType || (!asset.thumbnailStorageKey && !asset.thumbnailFilePath)) {
         return reply.code(404).send({
@@ -311,6 +329,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Normalize job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/convert-image", async (request, reply) => {
+    const parsedBody = convertImageJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Convert image payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createConvertImageJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Convert image job could not be queued.",
       });
     }
   });
