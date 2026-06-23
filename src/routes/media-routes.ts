@@ -14,6 +14,7 @@ import {
 } from "../lib/filesystem.js";
 import {
   createConvertImageJob,
+  createCropPadJob,
   createMergeJob,
   createNormalizeJob,
   createTrimJob,
@@ -53,6 +54,18 @@ const normalizeJobSchema = z.object({
     audioChannels: z.number().int().positive(),
     videoCodec: z.literal("h264"),
     audioCodec: z.literal("aac"),
+  }),
+});
+
+const cropPadJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    mode: z.enum(["crop", "pad"]),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    anchorX: z.enum(["left", "center", "right"]).optional(),
+    anchorY: z.enum(["top", "center", "bottom"]).optional(),
+    background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   }),
 });
 
@@ -353,6 +366,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Convert image job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/crop-pad", async (request, reply) => {
+    const parsedBody = cropPadJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Crop / pad payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createCropPadJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Crop / pad job could not be queued.",
       });
     }
   });

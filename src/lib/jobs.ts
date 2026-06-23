@@ -2,9 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
-import { resolveSupportedImageFormat } from "./asset-media.js";
+import {
+  isSupportedImageAssetLike,
+  isVideoAssetLike,
+  resolveSupportedImageFormat,
+} from "./asset-media.js";
 import type {
   ConvertImageJobOptions,
+  CropPadJobOptions,
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -290,6 +295,87 @@ export async function createNormalizeJob(
       {
         jobId: job.id,
         type: "normalize",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createCropPadJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: CropPadJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const isVideoSource = isVideoAssetLike({
+    mimeType: sourceAsset.mimeType,
+  });
+  const isSupportedImageSource = isSupportedImageAssetLike({
+    mimeType: sourceAsset.mimeType,
+    fileName: sourceAsset.originalName,
+  });
+  const sourceWidth = sourceAsset.metadata?.width;
+  const sourceHeight = sourceAsset.metadata?.height;
+
+  if (!isVideoSource && !isSupportedImageSource) {
+    throw new Error(
+      "Crop / pad currently supports video files and PNG, JPEG, or WebP images only.",
+    );
+  }
+
+  if (!sourceWidth || !sourceHeight) {
+    throw new Error(
+      "Crop / pad requires width and height metadata on the selected source file.",
+    );
+  }
+
+  if (isVideoSource && (options.target.width % 2 !== 0 || options.target.height % 2 !== 0)) {
+    throw new Error("Video crop / pad targets must use even width and height values.");
+  }
+
+  if (options.target.width === sourceWidth && options.target.height === sourceHeight) {
+    throw new Error(
+      "Crop / pad target matches the source dimensions. Change at least one size value.",
+    );
+  }
+
+  if (
+    options.target.mode === "crop" &&
+    (options.target.width > sourceWidth || options.target.height > sourceHeight)
+  ) {
+    throw new Error("Crop target cannot be larger than the source frame.");
+  }
+
+  if (
+    options.target.mode === "pad" &&
+    (options.target.width < sourceWidth || options.target.height < sourceHeight)
+  ) {
+    throw new Error("Pad target cannot be smaller than the source frame.");
+  }
+
+  const job = createQueuedJobRecord("crop-pad", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "crop-pad",
+      {
+        jobId: job.id,
+        type: "crop-pad",
         sourceAssetIds: [options.assetId],
         options,
       },

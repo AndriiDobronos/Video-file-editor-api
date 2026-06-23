@@ -1,7 +1,12 @@
 export type MediaAssetKind = "upload" | "output";
 export type MediaStorageDriver = "local" | "r2";
 
-export type JobType = "trim" | "merge" | "normalize" | "convert-image";
+export type JobType =
+  | "trim"
+  | "merge"
+  | "normalize"
+  | "crop-pad"
+  | "convert-image";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
 
@@ -81,6 +86,9 @@ export type NormalizeJobOptions = {
 
 export type ConvertImageFormat = "png" | "jpeg" | "webp";
 export type ConvertImageFit = "contain" | "cover" | "stretch";
+export type CropPadMode = "crop" | "pad";
+export type CropPadAnchorX = "left" | "center" | "right";
+export type CropPadAnchorY = "top" | "center" | "bottom";
 
 export type ConvertImageTarget = {
   format: ConvertImageFormat;
@@ -94,6 +102,20 @@ export type ConvertImageTarget = {
 export type ConvertImageJobOptions = {
   assetId: string;
   target: ConvertImageTarget;
+};
+
+export type CropPadTarget = {
+  mode: CropPadMode;
+  width: number;
+  height: number;
+  anchorX?: CropPadAnchorX;
+  anchorY?: CropPadAnchorY;
+  background?: string;
+};
+
+export type CropPadJobOptions = {
+  assetId: string;
+  target: CropPadTarget;
 };
 
 export type JobProgress = string | boolean | number | object | null;
@@ -113,6 +135,7 @@ export type ProcessingJob = {
     | TrimJobOptions
     | MergeJobOptions
     | NormalizeJobOptions
+    | CropPadJobOptions
     | ConvertImageJobOptions;
 };
 
@@ -124,6 +147,7 @@ export type QueueJobData = {
     | TrimJobOptions
     | MergeJobOptions
     | NormalizeJobOptions
+    | CropPadJobOptions
     | ConvertImageJobOptions;
 };
 

@@ -11,6 +11,7 @@ import {
 } from "./jobs.js";
 import {
   processConvertImageJob,
+  processCropPadJob,
   processMergeJob,
   processNormalizeJob,
   processTrimJob,
@@ -18,6 +19,7 @@ import {
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
   ConvertImageJobOptions,
+  CropPadJobOptions,
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -72,6 +74,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processNormalizeJob(
           redis,
           job.data.options as NormalizeJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "crop-pad") {
+        const outputAsset = await processCropPadJob(
+          redis,
+          job.data.options as CropPadJobOptions,
           reportProgress,
         );
 

@@ -40,6 +40,19 @@ export function resolveSupportedImageFormat(input: {
   return null;
 }
 
+export function isSupportedImageAssetLike(input: {
+  mimeType?: string | null;
+  fileName?: string | null;
+}) {
+  return Boolean(resolveSupportedImageFormat(input));
+}
+
+export function isVideoAssetLike(input: {
+  mimeType?: string | null;
+}) {
+  return input.mimeType?.toLowerCase().trim().startsWith("video/") ?? false;
+}
+
 export function isPreviewableAsset(input: {
   mimeType?: string | null;
   fileName?: string | null;

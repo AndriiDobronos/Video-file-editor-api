@@ -6,9 +6,15 @@ import { serverConfig } from "../config.js";
 import {
   getTargetImageExtension,
   getTargetImageMimeType,
+  isVideoAssetLike,
+  resolveSupportedImageFormat,
+  type SupportedImageFormat,
 } from "./asset-media.js";
 import type {
   ConvertImageJobOptions,
+  CropPadAnchorX,
+  CropPadAnchorY,
+  CropPadJobOptions,
   JobProgress,
   MediaMetadata,
   MergeJobOptions,
@@ -198,6 +204,17 @@ function buildConvertedImageOutputName(
   return `${baseName}-converted${getTargetImageExtension(options.target.format)}`;
 }
 
+function buildCropPadOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: CropPadJobOptions,
+  extension: string,
+) {
+  const sourceExtension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, sourceExtension) || "edited-media";
+
+  return `${baseName}-${options.target.mode}-${options.target.width}x${options.target.height}${extension}`;
+}
+
 function getConvertImageQuality(options: ConvertImageJobOptions) {
   return Math.max(1, Math.min(100, Math.round(options.target.quality ?? 92)));
 }
@@ -240,6 +257,79 @@ function buildConvertImageFilter(options: ConvertImageJobOptions) {
   }
 
   return filters.length > 0 ? filters.join(",") : null;
+}
+
+function getCropOffsetExpression(
+  anchor: CropPadAnchorX | CropPadAnchorY | undefined,
+  inputAxis: "iw" | "ih",
+  targetSize: number,
+) {
+  if (anchor === "left" || anchor === "top") {
+    return "0";
+  }
+
+  if (anchor === "right" || anchor === "bottom") {
+    return `${inputAxis}-${targetSize}`;
+  }
+
+  return `(${inputAxis}-${targetSize})/2`;
+}
+
+function getPadOffsetExpression(
+  anchor: CropPadAnchorX | CropPadAnchorY | undefined,
+  outputAxis: "ow" | "oh",
+  inputAxis: "iw" | "ih",
+) {
+  if (anchor === "left" || anchor === "top") {
+    return "0";
+  }
+
+  if (anchor === "right" || anchor === "bottom") {
+    return `${outputAxis}-${inputAxis}`;
+  }
+
+  return `(${outputAxis}-${inputAxis})/2`;
+}
+
+function getCropPadBackgroundColor(input: {
+  sourceAsset: StoredMediaAsset;
+  sourceImageFormat: SupportedImageFormat | null;
+  options: CropPadJobOptions;
+}) {
+  if (input.options.target.background) {
+    return `0x${input.options.target.background.replace(/^#/, "")}`;
+  }
+
+  if (isVideoAssetLike({ mimeType: input.sourceAsset.mimeType })) {
+    return "black";
+  }
+
+  return input.sourceImageFormat === "jpeg" ? "0xFFFFFF" : "black@0";
+}
+
+function buildCropPadFilter(input: {
+  sourceAsset: StoredMediaAsset;
+  sourceImageFormat: SupportedImageFormat | null;
+  options: CropPadJobOptions;
+}) {
+  const { options } = input;
+  const xAnchor = options.target.anchorX ?? "center";
+  const yAnchor = options.target.anchorY ?? "center";
+
+  if (options.target.mode === "crop") {
+    return [
+      `crop=${options.target.width}:${options.target.height}:` +
+        `${getCropOffsetExpression(xAnchor, "iw", options.target.width)}:` +
+        `${getCropOffsetExpression(yAnchor, "ih", options.target.height)}`,
+    ].join(",");
+  }
+
+  return [
+    `pad=${options.target.width}:${options.target.height}:` +
+      `${getPadOffsetExpression(xAnchor, "ow", "iw")}:` +
+      `${getPadOffsetExpression(yAnchor, "oh", "ih")}:` +
+      `color=${getCropPadBackgroundColor(input)}`,
+  ].join(",");
 }
 
 export async function processTrimJob(
@@ -419,6 +509,109 @@ export async function processConvertImageJob(
       filePath: outputFilePath,
       originalName: buildConvertedImageOutputName(sourceAsset, options),
       mimeType: getTargetImageMimeType(options.target.format),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processCropPadJob(
+  redis: Redis,
+  options: CropPadJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const sourceImageFormat = resolveSupportedImageFormat({
+    mimeType: sourceAsset.mimeType,
+    fileName: sourceAsset.originalName,
+  });
+  const isVideoSource = isVideoAssetLike({
+    mimeType: sourceAsset.mimeType,
+  });
+
+  if (!isVideoSource && !sourceImageFormat) {
+    throw new Error(
+      "Crop / pad currently supports video files and PNG, JPEG, or WebP images only.",
+    );
+  }
+
+  const resolvedImageFormat = sourceImageFormat as SupportedImageFormat | null;
+  const outputExtension = isVideoSource
+    ? ".mp4"
+    : getTargetImageExtension(resolvedImageFormat!);
+  const outputFilePath = buildOutputFilePath("crop-pad", outputExtension);
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "crop-pad-sources",
+  );
+  const filter = buildCropPadFilter({
+    sourceAsset,
+    sourceImageFormat: resolvedImageFormat,
+    options,
+  });
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = ["-y", "-i", stagedSourceAsset.localFilePath, "-vf", filter];
+
+    if (isVideoSource) {
+      ffmpegArgs.push(
+        "-map",
+        "0:v:0?",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+      );
+    } else {
+      ffmpegArgs.push("-frames:v", "1");
+
+      if (resolvedImageFormat === "png") {
+        ffmpegArgs.push("-c:v", "png", "-update", "1");
+      }
+
+      if (resolvedImageFormat === "jpeg") {
+        ffmpegArgs.push("-update", "1", "-q:v", "3");
+      }
+
+      if (resolvedImageFormat === "webp") {
+        ffmpegArgs.push("-c:v", "libwebp", "-quality", "92");
+      }
+    }
+
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildCropPadOutputName(sourceAsset, options, outputExtension),
+      mimeType:
+        isVideoSource || !resolvedImageFormat
+          ? undefined
+          : getTargetImageMimeType(resolvedImageFormat),
     });
 
     await reportProgress(onProgress, 100);
