@@ -6,10 +6,11 @@ import { pipeline } from "node:stream/promises";
 import type { MultipartFile } from "@fastify/multipart";
 import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
-import type { MediaAssetDto, StoredMediaAsset } from "../types.js";
-import { probeMedia } from "./media.js";
+import type { MediaAssetDto, MediaStorageDriver, StoredMediaAsset } from "../types.js";
+import { generateThumbnailPreview, probeMedia } from "./media.js";
 import {
   buildObjectStorageKey,
+  buildThumbnailStorageKey,
   buildTemporaryWorkingFilePath,
   cleanupTemporaryFile,
   deleteR2Object,
@@ -39,6 +40,11 @@ function createStoredFileName(fileName: string) {
   return `${fileBase}-${randomUUID()}${extension}`;
 }
 
+function buildThumbnailFileName(storedName: string) {
+  const extensionlessName = path.basename(storedName, path.extname(storedName));
+  return `${extensionlessName}.jpg`;
+}
+
 function getAssetRecordKey(assetId: string) {
   return `${serverConfig.redisKeys.assetRecordPrefix}:${assetId}`;
 }
@@ -49,9 +55,69 @@ export async function ensureStorageDirectories() {
       serverConfig.storageRoot,
       serverConfig.uploadsDir,
       serverConfig.outputsDir,
+      serverConfig.thumbnailsDir,
       serverConfig.tempDir,
     ].map((directory) => mkdir(directory, { recursive: true })),
   );
+}
+
+async function createStoredAssetThumbnail(input: {
+  localFilePath: string;
+  storedName: string;
+  storageDriver: MediaStorageDriver;
+  metadata: StoredMediaAsset["metadata"];
+}) {
+  if (!input.metadata?.videoCodec) {
+    return {
+      thumbnailStorageKey: null,
+      thumbnailMimeType: null,
+      thumbnailFilePath: null,
+    };
+  }
+
+  const thumbnailStorageKey = buildThumbnailStorageKey(input.storedName);
+  const thumbnailFileName = buildThumbnailFileName(input.storedName);
+  const thumbnailFilePath =
+    input.storageDriver === "local"
+      ? path.join(serverConfig.thumbnailsDir, thumbnailFileName)
+      : buildTemporaryWorkingFilePath("asset-thumbnails", thumbnailFileName);
+
+  try {
+    await ensureWorkingDirectory(thumbnailFilePath);
+    await generateThumbnailPreview(input.localFilePath, thumbnailFilePath);
+
+    if (input.storageDriver === "r2") {
+      await uploadLocalFileToR2({
+        localFilePath: thumbnailFilePath,
+        objectKey: thumbnailStorageKey,
+        contentType: "image/jpeg",
+      });
+    }
+
+    return {
+      thumbnailStorageKey,
+      thumbnailMimeType: "image/jpeg",
+      thumbnailFilePath: input.storageDriver === "local" ? thumbnailFilePath : null,
+    };
+  } catch (error) {
+    console.warn(
+      `Thumbnail generation failed for "${input.storedName}": ${
+        error instanceof Error ? error.message : "Unknown error."
+      }`,
+    );
+
+    await cleanupTemporaryFile(thumbnailFilePath);
+
+    return {
+      thumbnailStorageKey: null,
+      thumbnailMimeType: null,
+      thumbnailFilePath: null,
+    };
+  } finally {
+    if (input.storageDriver === "r2") {
+      await cleanupTemporaryFile(thumbnailFilePath);
+    }
+  }
 }
 
 async function persistStoredAsset(input: {
@@ -75,22 +141,36 @@ async function persistStoredAsset(input: {
     });
   }
 
+  const thumbnail = await createStoredAssetThumbnail({
+    localFilePath: input.localFilePath,
+    storedName: input.storedName,
+    storageDriver,
+    metadata,
+  });
+
   const asset: StoredMediaAsset = {
     id: randomUUID(),
     kind: input.kind,
     storageDriver,
     storageKey,
+    thumbnailStorageKey: thumbnail.thumbnailStorageKey,
     originalName: input.originalName,
     storedName: input.storedName,
     mimeType: input.mimeType,
+    thumbnailMimeType: thumbnail.thumbnailMimeType,
     sizeBytes: fileStats.size,
     filePath: storageDriver === "local" ? input.localFilePath : null,
+    thumbnailFilePath: thumbnail.thumbnailFilePath,
     createdAt: new Date().toISOString(),
     downloadUrl: "",
+    thumbnailUrl: null,
     metadata,
   };
 
   asset.downloadUrl = `/api/v1/assets/${asset.id}/download`;
+  asset.thumbnailUrl = asset.thumbnailStorageKey
+    ? `/api/v1/assets/${asset.id}/thumbnail`
+    : null;
   const createdAtScore = Date.parse(asset.createdAt) || Date.now();
 
   await Promise.all([
@@ -193,9 +273,15 @@ export async function deleteAsset(redis: Redis, assetId: string) {
   const asset = await getAssetOrThrow(redis, assetId);
 
   if (asset.storageDriver === "r2") {
-    await deleteR2Object(asset.storageKey);
+    await Promise.all([
+      deleteR2Object(asset.storageKey),
+      asset.thumbnailStorageKey ? deleteR2Object(asset.thumbnailStorageKey) : Promise.resolve(),
+    ]);
   } else {
-    await cleanupTemporaryFile(asset.filePath);
+    await Promise.all([
+      cleanupTemporaryFile(asset.filePath),
+      cleanupTemporaryFile(asset.thumbnailFilePath ?? null),
+    ]);
   }
 
   await Promise.all([

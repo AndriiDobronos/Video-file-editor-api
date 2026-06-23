@@ -174,6 +174,11 @@ export function buildObjectStorageKey(kind: MediaAssetKind, storedName: string) 
   return `${kind === "upload" ? "uploads" : "outputs"}/${storedName}`;
 }
 
+export function buildThumbnailStorageKey(storedName: string) {
+  const extensionlessName = path.basename(storedName, path.extname(storedName));
+  return `thumbnails/${extensionlessName}.jpg`;
+}
+
 export function buildTemporaryWorkingFilePath(prefix: string, storedName: string) {
   return path.join(serverConfig.tempDir, prefix, `${randomUUID()}-${storedName}`);
 }
@@ -235,7 +240,23 @@ export async function downloadR2ObjectToLocalFile(input: {
   await pipeline(response.Body as Readable, createWriteStream(input.localFilePath));
 }
 
-export async function createSignedR2DownloadUrl(asset: StoredMediaAsset) {
+function buildContentDisposition(input: {
+  disposition: "attachment" | "inline";
+  fileName?: string;
+}) {
+  if (!input.fileName) {
+    return input.disposition;
+  }
+
+  return `${input.disposition}; filename="${input.fileName.replace(/"/g, "")}"`;
+}
+
+export async function createSignedR2ObjectUrl(input: {
+  objectKey: string;
+  contentType: string;
+  disposition?: "attachment" | "inline";
+  fileName?: string;
+}) {
   const client = getObjectStorageClient();
   const config = getRequiredR2Config();
   const expiresIn = Number(
@@ -246,14 +267,26 @@ export async function createSignedR2DownloadUrl(asset: StoredMediaAsset) {
     client,
     new GetObjectCommand({
       Bucket: config.bucket,
-      Key: asset.storageKey,
-      ResponseContentType: asset.mimeType,
-      ResponseContentDisposition: `attachment; filename="${asset.originalName.replace(/"/g, "")}"`,
+      Key: input.objectKey,
+      ResponseContentType: input.contentType,
+      ResponseContentDisposition: buildContentDisposition({
+        disposition: input.disposition ?? "inline",
+        fileName: input.fileName,
+      }),
     }),
     {
       expiresIn,
     },
   );
+}
+
+export async function createSignedR2DownloadUrl(asset: StoredMediaAsset) {
+  return createSignedR2ObjectUrl({
+    objectKey: asset.storageKey,
+    contentType: asset.mimeType,
+    disposition: "attachment",
+    fileName: asset.originalName,
+  });
 }
 
 export async function cleanupTemporaryFile(filePath: string | null | undefined) {

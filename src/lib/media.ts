@@ -54,6 +54,24 @@ function buildOutputFilePath(prefix: string) {
   return path.join(serverConfig.outputsDir, `${prefix}-${randomUUID()}.mp4`);
 }
 
+export async function generateThumbnailPreview(
+  inputFilePath: string,
+  outputFilePath: string,
+) {
+  await runCommand("ffmpeg", [
+    "-y",
+    "-i",
+    inputFilePath,
+    "-vf",
+    "thumbnail,scale='min(320,iw)':-2",
+    "-frames:v",
+    "1",
+    "-q:v",
+    "3",
+    outputFilePath,
+  ]);
+}
+
 function toForwardSlashPath(filePath: string) {
   return filePath.replace(/\\/g, "/");
 }

@@ -18,7 +18,10 @@ import {
   getJobDto,
   listJobDtos,
 } from "../lib/jobs.js";
-import { createSignedR2DownloadUrl } from "../lib/object-storage.js";
+import {
+  createSignedR2DownloadUrl,
+  createSignedR2ObjectUrl,
+} from "../lib/object-storage.js";
 import { toAssetDto } from "../lib/serializers.js";
 import type { QueueJobData, QueueJobResult } from "../types.js";
 
@@ -110,6 +113,54 @@ export async function registerMediaRoutes(
     } catch (error) {
       const message = error instanceof Error ? error.message : "Asset was not found.";
       const statusCode = message.includes("was not found") ? 404 : 500;
+
+      return reply.code(statusCode).send({
+        message,
+      });
+    }
+  });
+
+  app.get("/api/v1/assets/:assetId/thumbnail", async (request, reply) => {
+    try {
+      const params = request.params as { assetId: string };
+      const asset = await getAssetOrThrow(deps.redis, params.assetId);
+
+      if (!asset.thumbnailMimeType || (!asset.thumbnailStorageKey && !asset.thumbnailFilePath)) {
+        return reply.code(404).send({
+          message: `Asset "${asset.originalName}" does not have a thumbnail preview yet.`,
+        });
+      }
+
+      if (asset.storageDriver === "r2") {
+        if (!asset.thumbnailStorageKey) {
+          throw new Error(`Asset "${asset.id}" is missing its thumbnail storage key.`);
+        }
+
+        return reply.redirect(
+          await createSignedR2ObjectUrl({
+            objectKey: asset.thumbnailStorageKey,
+            contentType: asset.thumbnailMimeType,
+            disposition: "inline",
+            fileName: `${asset.originalName.replace(/\.[^.]+$/, "")}-thumbnail.jpg`,
+          }),
+        );
+      }
+
+      if (!asset.thumbnailFilePath) {
+        throw new Error(`Asset "${asset.id}" is missing its local thumbnail path.`);
+      }
+
+      reply.header("Content-Type", asset.thumbnailMimeType);
+      reply.header("Content-Disposition", "inline");
+
+      return reply.send(createReadStream(asset.thumbnailFilePath));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Asset thumbnail was not found.";
+      const statusCode =
+        message.includes("does not have a thumbnail") || message.includes("was not found")
+          ? 404
+          : 500;
 
       return reply.code(statusCode).send({
         message,

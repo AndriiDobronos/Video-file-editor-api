@@ -24,19 +24,27 @@ export type StoredMediaAsset = {
   kind: MediaAssetKind;
   storageDriver: MediaStorageDriver;
   storageKey: string;
+  thumbnailStorageKey: string | null;
   originalName: string;
   storedName: string;
   mimeType: string;
+  thumbnailMimeType: string | null;
   sizeBytes: number;
   filePath: string | null;
+  thumbnailFilePath: string | null;
   createdAt: string;
   downloadUrl: string;
+  thumbnailUrl: string | null;
   metadata: MediaMetadata | null;
 };
 
 export type MediaAssetDto = Omit<
   StoredMediaAsset,
-  "filePath" | "storedName" | "storageKey"
+  | "filePath"
+  | "storedName"
+  | "storageKey"
+  | "thumbnailFilePath"
+  | "thumbnailStorageKey"
 >;
 
 export type TrimJobOptions = {

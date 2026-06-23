@@ -10,6 +10,7 @@ export const serverConfig = {
   storageRoot,
   uploadsDir: path.join(storageRoot, "uploads"),
   outputsDir: path.join(storageRoot, "outputs"),
+  thumbnailsDir: path.join(storageRoot, "thumbnails"),
   tempDir: path.join(storageRoot, "temp"),
   defaultPort: 4001,
   defaultHost: "0.0.0.0",

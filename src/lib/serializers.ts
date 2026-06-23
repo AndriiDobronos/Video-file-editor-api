@@ -7,9 +7,13 @@ export function toAssetDto(asset: StoredMediaAsset): MediaAssetDto {
     storageDriver: asset.storageDriver,
     originalName: asset.originalName,
     mimeType: asset.mimeType,
+    thumbnailMimeType: asset.thumbnailMimeType ?? null,
     sizeBytes: asset.sizeBytes,
     createdAt: asset.createdAt,
-    downloadUrl: asset.downloadUrl,
+    downloadUrl: asset.downloadUrl || `/api/v1/assets/${asset.id}/download`,
+    thumbnailUrl:
+      asset.thumbnailUrl ??
+      (asset.thumbnailStorageKey ? `/api/v1/assets/${asset.id}/thumbnail` : null),
     metadata: asset.metadata,
   };
 }

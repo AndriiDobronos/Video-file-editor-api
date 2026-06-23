@@ -5,3 +5,5 @@ storage
 .env.example
 npm-debug.log*
 dump.rdb
+tempclip-a.mp4
+tempclip-b.mp4
