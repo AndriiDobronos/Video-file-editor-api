@@ -342,6 +342,73 @@ export async function ensureAssetThumbnail(
   }
 }
 
+export async function regenerateAssetThumbnail(
+  redis: Redis,
+  assetId: string,
+): Promise<StoredMediaAsset> {
+  const asset = await getAssetOrThrow(redis, assetId);
+
+  if (
+    !isPreviewableAsset({
+      mimeType: asset.mimeType,
+      fileName: asset.originalName,
+      metadata: asset.metadata,
+    })
+  ) {
+    throw new Error(
+      `Asset "${asset.originalName}" does not support thumbnail previews.`,
+    );
+  }
+
+  const stagedOriginalFilePath =
+    asset.storageDriver === "local"
+      ? asset.filePath
+      : buildTemporaryWorkingFilePath("asset-thumbnail-regenerate", asset.storedName);
+
+  if (!stagedOriginalFilePath) {
+    throw new Error(`Asset "${asset.id}" is missing its local file path.`);
+  }
+
+  if (asset.storageDriver === "r2") {
+    await downloadR2ObjectToLocalFile({
+      objectKey: asset.storageKey,
+      localFilePath: stagedOriginalFilePath,
+    });
+  }
+
+  try {
+    const thumbnail = await createStoredAssetThumbnail({
+      localFilePath: stagedOriginalFilePath,
+      storedName: asset.storedName,
+      storageDriver: asset.storageDriver,
+      mimeType: asset.mimeType,
+      metadata: asset.metadata,
+    });
+
+    if (
+      !thumbnail.thumbnailMimeType ||
+      (!thumbnail.thumbnailStorageKey && !thumbnail.thumbnailFilePath)
+    ) {
+      throw new Error(`Thumbnail preview could not be regenerated for "${asset.originalName}".`);
+    }
+
+    const nextAsset: StoredMediaAsset = {
+      ...asset,
+      thumbnailStorageKey: thumbnail.thumbnailStorageKey,
+      thumbnailMimeType: thumbnail.thumbnailMimeType,
+      thumbnailFilePath: thumbnail.thumbnailFilePath,
+      thumbnailUrl: buildAssetThumbnailUrl(asset.id),
+    };
+
+    await setJsonRecord(redis, getAssetRecordKey(asset.id), nextAsset);
+    return nextAsset;
+  } finally {
+    if (asset.storageDriver === "r2") {
+      await cleanupTemporaryFile(stagedOriginalFilePath);
+    }
+  }
+}
+
 export async function listAssetDtos(redis: Redis): Promise<MediaAssetDto[]> {
   const assetIds = await redis.zrevrange(serverConfig.redisKeys.assetIndex, 0, -1);
   const assets = await getManyJsonRecords<StoredMediaAsset>(

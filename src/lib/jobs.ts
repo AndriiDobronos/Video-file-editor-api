@@ -8,8 +8,10 @@ import {
   resolveSupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  CompressVideoJobOptions,
   ConvertImageJobOptions,
   CropPadJobOptions,
+  ExtractFrameJobOptions,
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -295,6 +297,99 @@ export async function createNormalizeJob(
       {
         jobId: job.id,
         type: "normalize",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createCompressVideoJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: CompressVideoJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!sourceAsset.metadata?.videoCodec) {
+    throw new Error("Compression currently requires a video asset with a video stream.");
+  }
+
+  const job = createQueuedJobRecord("compress-video", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "compress-video",
+      {
+        jobId: job.id,
+        type: "compress-video",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createExtractFrameJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: ExtractFrameJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const duration = sourceAsset.metadata?.durationSeconds;
+
+  if (!sourceAsset.metadata?.videoCodec) {
+    throw new Error("Frame extraction currently requires a video asset.");
+  }
+
+  if (options.target.timeSeconds < 0) {
+    throw new Error("Frame extraction time must be zero or greater.");
+  }
+
+  if (
+    duration !== null &&
+    duration !== undefined &&
+    options.target.timeSeconds > duration
+  ) {
+    throw new Error("Frame extraction time cannot be greater than the source duration.");
+  }
+
+  const job = createQueuedJobRecord("extract-frame", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "extract-frame",
+      {
+        jobId: job.id,
+        type: "extract-frame",
         sourceAssetIds: [options.assetId],
         options,
       },

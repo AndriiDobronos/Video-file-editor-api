@@ -10,16 +10,20 @@ import {
   updateJobProgress,
 } from "./jobs.js";
 import {
+  processCompressVideoJob,
   processConvertImageJob,
   processCropPadJob,
+  processExtractFrameJob,
   processMergeJob,
   processNormalizeJob,
   processTrimJob,
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
+  CompressVideoJobOptions,
   ConvertImageJobOptions,
   CropPadJobOptions,
+  ExtractFrameJobOptions,
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -74,6 +78,32 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processNormalizeJob(
           redis,
           job.data.options as NormalizeJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "compress-video") {
+        const outputAsset = await processCompressVideoJob(
+          redis,
+          job.data.options as CompressVideoJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "extract-frame") {
+        const outputAsset = await processExtractFrameJob(
+          redis,
+          job.data.options as ExtractFrameJobOptions,
           reportProgress,
         );
 

@@ -10,11 +10,14 @@ import {
   getAssetDto,
   getAssetOrThrow,
   listAssetDtos,
+  regenerateAssetThumbnail,
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  createCompressVideoJob,
   createConvertImageJob,
   createCropPadJob,
+  createExtractFrameJob,
   createMergeJob,
   createNormalizeJob,
   createTrimJob,
@@ -57,6 +60,26 @@ const normalizeJobSchema = z.object({
   }),
 });
 
+const compressVideoJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    mode: z.enum(["simple", "advanced"]),
+    preset: z.enum(["high-quality", "balanced", "small-file"]).optional(),
+    crf: z.number().int().min(0).max(51).optional(),
+    videoBitrateKbps: z.number().int().positive().optional(),
+    audioBitrateKbps: z.number().int().positive().optional(),
+    encoderPreset: z.enum([
+      "ultrafast",
+      "superfast",
+      "veryfast",
+      "faster",
+      "fast",
+      "medium",
+      "slow",
+    ]).optional(),
+  }),
+});
+
 const cropPadJobSchema = z.object({
   assetId: z.string().min(1),
   target: z.object({
@@ -65,6 +88,19 @@ const cropPadJobSchema = z.object({
     height: z.number().int().positive(),
     anchorX: z.enum(["left", "center", "right"]).optional(),
     anchorY: z.enum(["top", "center", "bottom"]).optional(),
+    background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  }),
+});
+
+const extractFrameJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    timeSeconds: z.number().min(0),
+    format: z.enum(["png", "jpeg", "webp"]),
+    quality: z.number().int().min(1).max(100).optional(),
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
+    fit: z.enum(["contain", "cover", "stretch"]).optional(),
     background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   }),
 });
@@ -192,6 +228,26 @@ export async function registerMediaRoutes(
         message.includes("does not have a thumbnail") || message.includes("was not found")
           ? 404
           : 500;
+
+      return reply.code(statusCode).send({
+        message,
+      });
+    }
+  });
+
+  app.post("/api/v1/assets/:assetId/thumbnail/regenerate", async (request, reply) => {
+    try {
+      const params = request.params as { assetId: string };
+      const asset = await regenerateAssetThumbnail(deps.redis, params.assetId);
+
+      return reply.send({
+        item: toAssetDto(asset),
+        message: `Thumbnail preview for "${asset.originalName}" was regenerated.`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Asset thumbnail could not be regenerated.";
+      const statusCode = message.includes("was not found") ? 404 : 400;
 
       return reply.code(statusCode).send({
         message,
@@ -346,6 +402,30 @@ export async function registerMediaRoutes(
     }
   });
 
+  app.post("/api/v1/jobs/compress-video", async (request, reply) => {
+    const parsedBody = compressVideoJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Compress video payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createCompressVideoJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Compress video job could not be queued.",
+      });
+    }
+  });
+
   app.post("/api/v1/jobs/convert-image", async (request, reply) => {
     const parsedBody = convertImageJobSchema.safeParse(request.body);
 
@@ -366,6 +446,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Convert image job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/extract-frame", async (request, reply) => {
+    const parsedBody = extractFrameJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Extract frame payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createExtractFrameJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Extract frame job could not be queued.",
       });
     }
   });

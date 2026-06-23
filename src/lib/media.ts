@@ -11,16 +11,22 @@ import {
   type SupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  CompressVideoJobOptions,
   ConvertImageJobOptions,
+  ConvertImageFit,
+  ConvertImageFormat,
   CropPadAnchorX,
   CropPadAnchorY,
   CropPadJobOptions,
+  ExtractFrameJobOptions,
   JobProgress,
   MediaMetadata,
   MergeJobOptions,
   NormalizeJobOptions,
   StoredMediaAsset,
   TrimJobOptions,
+  VideoCompressionEncoderPreset,
+  VideoCompressionPreset,
 } from "../types.js";
 import { runCommand } from "./command.js";
 import { ensureStorageDirectories, getAssetOrThrow, registerOutputAsset } from "./filesystem.js";
@@ -194,6 +200,12 @@ function buildNormalizedOutputName(
   return `${baseName}-normalized-${options.target.width}x${options.target.height}.mp4`;
 }
 
+function buildCompressedVideoOutputName(sourceAsset: StoredMediaAsset) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "compressed-video";
+  return `${baseName}-compressed.mp4`;
+}
+
 function buildConvertedImageOutputName(
   sourceAsset: StoredMediaAsset,
   options: ConvertImageJobOptions,
@@ -215,25 +227,86 @@ function buildCropPadOutputName(
   return `${baseName}-${options.target.mode}-${options.target.width}x${options.target.height}${extension}`;
 }
 
-function getConvertImageQuality(options: ConvertImageJobOptions) {
-  return Math.max(1, Math.min(100, Math.round(options.target.quality ?? 92)));
+function buildExtractFrameOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: ExtractFrameJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "video-frame";
+  const timestampLabel = options.target.timeSeconds.toFixed(2).replace(/[^\d]+/g, "-");
+
+  return `${baseName}-frame-${timestampLabel}${getTargetImageExtension(options.target.format)}`;
+}
+
+type StillImageTargetInput = {
+  format: ConvertImageFormat;
+  quality?: number;
+  width?: number;
+  height?: number;
+  fit?: ConvertImageFit;
+  background?: string;
+};
+
+type CompressionProfile = {
+  encoderPreset: VideoCompressionEncoderPreset;
+  crf?: number;
+  videoBitrateKbps?: number;
+  audioBitrateKbps: number;
+};
+
+const simpleCompressionProfiles: Record<VideoCompressionPreset, CompressionProfile> = {
+  "high-quality": {
+    encoderPreset: "slow",
+    crf: 20,
+    audioBitrateKbps: 192,
+  },
+  balanced: {
+    encoderPreset: "medium",
+    crf: 24,
+    audioBitrateKbps: 128,
+  },
+  "small-file": {
+    encoderPreset: "slow",
+    crf: 30,
+    audioBitrateKbps: 96,
+  },
+};
+
+function resolveCompressionProfile(options: CompressVideoJobOptions): CompressionProfile {
+  if (options.target.mode === "simple") {
+    return (
+      simpleCompressionProfiles[options.target.preset ?? "balanced"] ??
+      simpleCompressionProfiles.balanced
+    );
+  }
+
+  return {
+    encoderPreset: options.target.encoderPreset ?? "medium",
+    crf: options.target.crf ?? (options.target.videoBitrateKbps ? undefined : 23),
+    videoBitrateKbps: options.target.videoBitrateKbps,
+    audioBitrateKbps: options.target.audioBitrateKbps ?? 128,
+  };
+}
+
+function getStillImageQuality(input: { target: StillImageTargetInput }) {
+  return Math.max(1, Math.min(100, Math.round(input.target.quality ?? 92)));
 }
 
 function getJpegQValue(quality: number) {
   return Math.max(2, Math.min(31, Math.round(31 - ((quality - 1) * 29) / 99)));
 }
 
-function getFilterBackgroundColor(options: ConvertImageJobOptions) {
-  if (options.target.background) {
-    return `0x${options.target.background.replace(/^#/, "")}`;
+function getStillImageBackgroundColor(input: { target: StillImageTargetInput }) {
+  if (input.target.background) {
+    return `0x${input.target.background.replace(/^#/, "")}`;
   }
 
-  return options.target.format === "jpeg" ? "0xFFFFFF" : "black@0";
+  return input.target.format === "jpeg" ? "0xFFFFFF" : "black@0";
 }
 
-function buildConvertImageFilter(options: ConvertImageJobOptions) {
-  const { width, height } = options.target;
-  const fit = options.target.fit ?? "contain";
+function buildStillImageFilter(target: StillImageTargetInput) {
+  const { width, height } = target;
+  const fit = target.fit ?? "contain";
   const filters: string[] = [];
 
   if (width && height) {
@@ -244,7 +317,7 @@ function buildConvertImageFilter(options: ConvertImageJobOptions) {
       filters.push(`crop=${width}:${height}`);
     } else {
       filters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease`);
-      filters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${getFilterBackgroundColor(options)}`);
+      filters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=${getStillImageBackgroundColor({ target })}`);
     }
   } else if (width) {
     filters.push(`scale=${width}:-2`);
@@ -252,11 +325,31 @@ function buildConvertImageFilter(options: ConvertImageJobOptions) {
     filters.push(`scale=-2:${height}`);
   }
 
-  if (options.target.format === "jpeg") {
+  if (target.format === "jpeg") {
     filters.push("format=yuv420p");
   }
 
   return filters.length > 0 ? filters.join(",") : null;
+}
+
+function appendStillImageEncodingArgs(
+  ffmpegArgs: string[],
+  target: StillImageTargetInput,
+  quality: number,
+) {
+  ffmpegArgs.push("-frames:v", "1");
+
+  if (target.format === "png") {
+    ffmpegArgs.push("-c:v", "png", "-update", "1");
+  }
+
+  if (target.format === "jpeg") {
+    ffmpegArgs.push("-update", "1", "-q:v", `${getJpegQValue(quality)}`);
+  }
+
+  if (target.format === "webp") {
+    ffmpegArgs.push("-c:v", "libwebp", "-quality", `${quality}`);
+  }
 }
 
 function getCropOffsetExpression(
@@ -459,6 +552,71 @@ export async function processNormalizeJob(
   }
 }
 
+export async function processCompressVideoJob(
+  redis: Redis,
+  options: CompressVideoJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath("compressed");
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "compress-sources",
+  );
+  const compressionProfile = resolveCompressionProfile(options);
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = [
+      "-y",
+      "-i",
+      stagedSourceAsset.localFilePath,
+      "-map",
+      "0:v:0?",
+      "-map",
+      "0:a:0?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      compressionProfile.encoderPreset,
+      "-pix_fmt",
+      "yuv420p",
+    ];
+
+    if (typeof compressionProfile.crf === "number") {
+      ffmpegArgs.push("-crf", `${compressionProfile.crf}`);
+    }
+
+    if (compressionProfile.videoBitrateKbps) {
+      ffmpegArgs.push("-b:v", `${compressionProfile.videoBitrateKbps}k`);
+    }
+
+    ffmpegArgs.push("-c:a", "aac", "-b:a", `${compressionProfile.audioBitrateKbps}k`);
+    ffmpegArgs.push("-movflags", "+faststart", outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildCompressedVideoOutputName(sourceAsset),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
 export async function processConvertImageJob(
   redis: Redis,
   options: ConvertImageJobOptions,
@@ -473,8 +631,8 @@ export async function processConvertImageJob(
     sourceAsset,
     "convert-image-sources",
   );
-  const filter = buildConvertImageFilter(options);
-  const quality = getConvertImageQuality(options);
+  const filter = buildStillImageFilter(options.target);
+  const quality = getStillImageQuality({ target: options.target });
 
   await ensureStorageDirectories();
   await reportProgress(onProgress, 10);
@@ -486,19 +644,7 @@ export async function processConvertImageJob(
       ffmpegArgs.push("-vf", filter);
     }
 
-    ffmpegArgs.push("-frames:v", "1");
-
-    if (options.target.format === "png") {
-      ffmpegArgs.push("-c:v", "png", "-update", "1");
-    }
-
-    if (options.target.format === "jpeg") {
-      ffmpegArgs.push("-update", "1", "-q:v", `${getJpegQValue(quality)}`);
-    }
-
-    if (options.target.format === "webp") {
-      ffmpegArgs.push("-c:v", "libwebp", "-quality", `${quality}`);
-    }
+    appendStillImageEncodingArgs(ffmpegArgs, options.target, quality);
 
     ffmpegArgs.push(outputFilePath);
 
@@ -508,6 +654,64 @@ export async function processConvertImageJob(
     const outputAsset = await registerOutputAsset(redis, {
       filePath: outputFilePath,
       originalName: buildConvertedImageOutputName(sourceAsset, options),
+      mimeType: getTargetImageMimeType(options.target.format),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processExtractFrameJob(
+  redis: Redis,
+  options: ExtractFrameJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath(
+    "frame",
+    getTargetImageExtension(options.target.format),
+  );
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "extract-frame-sources",
+  );
+  const filter = buildStillImageFilter(options.target);
+  const quality = getStillImageQuality({ target: options.target });
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = [
+      "-y",
+      "-ss",
+      `${options.target.timeSeconds}`,
+      "-i",
+      stagedSourceAsset.localFilePath,
+    ];
+
+    if (filter) {
+      ffmpegArgs.push("-vf", filter);
+    }
+
+    appendStillImageEncodingArgs(ffmpegArgs, options.target, quality);
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildExtractFrameOutputName(sourceAsset, options),
       mimeType: getTargetImageMimeType(options.target.format),
     });
 
