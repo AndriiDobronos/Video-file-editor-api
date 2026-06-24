@@ -423,8 +423,7 @@ function buildTextOverlayFilter(input: {
   target: TextOverlayTarget;
 }) {
   const enableExpression = buildTextOverlayEnableExpression(input.target);
-  const filterParts = [
-    "drawtext",
+  const filterOptions = [
     `textfile='${escapeDrawtextFilePath(input.textFilePath)}'`,
     "reload=0",
     `fontsize=${Math.max(12, Math.round(input.target.fontSize ?? 42))}`,
@@ -437,10 +436,10 @@ function buildTextOverlayFilter(input: {
   ];
 
   if (enableExpression) {
-    filterParts.push(`enable='${enableExpression}'`);
+    filterOptions.push(`enable='${enableExpression}'`);
   }
 
-  return filterParts.join(":");
+  return `drawtext=${filterOptions.join(":")}`;
 }
 
 function getCropOffsetExpression(
