@@ -10,9 +10,12 @@ import {
   updateJobProgress,
 } from "./jobs.js";
 import {
+  processChangeSpeedJob,
   processCompressVideoJob,
   processConvertImageJob,
   processCropPadJob,
+  processEditAudioTrackJob,
+  processExtractAudioJob,
   processExtractFrameJob,
   processMergeJob,
   processNormalizeJob,
@@ -21,9 +24,12 @@ import {
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
+  ChangeSpeedJobOptions,
   CompressVideoJobOptions,
   ConvertImageJobOptions,
   CropPadJobOptions,
+  EditAudioTrackJobOptions,
+  ExtractAudioJobOptions,
   ExtractFrameJobOptions,
   JobProgress,
   MergeJobOptions,
@@ -106,6 +112,45 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processExtractFrameJob(
           redis,
           job.data.options as ExtractFrameJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "extract-audio") {
+        const outputAsset = await processExtractAudioJob(
+          redis,
+          job.data.options as ExtractAudioJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "edit-audio-track") {
+        const outputAsset = await processEditAudioTrackJob(
+          redis,
+          job.data.options as EditAudioTrackJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "change-speed") {
+        const outputAsset = await processChangeSpeedJob(
+          redis,
+          job.data.options as ChangeSpeedJobOptions,
           reportProgress,
         );
 

@@ -7,6 +7,9 @@ export type JobType =
   | "normalize"
   | "compress-video"
   | "extract-frame"
+  | "extract-audio"
+  | "edit-audio-track"
+  | "change-speed"
   | "overlay-text"
   | "crop-pad"
   | "convert-image";
@@ -119,6 +122,8 @@ export type CropPadAnchorX = "left" | "center" | "right";
 export type CropPadAnchorY = "top" | "center" | "bottom";
 export type TextOverlayHorizontal = "left" | "center" | "right";
 export type TextOverlayVertical = "top" | "center" | "bottom";
+export type AudioExtractFormat = "mp3" | "m4a" | "wav";
+export type AudioTrackEditMode = "mute" | "replace";
 
 export type ConvertImageTarget = {
   format: ConvertImageFormat;
@@ -147,6 +152,35 @@ export type ExtractFrameTarget = {
 export type ExtractFrameJobOptions = {
   assetId: string;
   target: ExtractFrameTarget;
+};
+
+export type AudioExtractTarget = {
+  format: AudioExtractFormat;
+};
+
+export type ExtractAudioJobOptions = {
+  assetId: string;
+  target: AudioExtractTarget;
+};
+
+export type AudioTrackEditTarget = {
+  mode: AudioTrackEditMode;
+  replacementAssetId?: string;
+  loopReplacement?: boolean;
+};
+
+export type EditAudioTrackJobOptions = {
+  assetId: string;
+  target: AudioTrackEditTarget;
+};
+
+export type PlaybackSpeedTarget = {
+  rate: number;
+};
+
+export type ChangeSpeedJobOptions = {
+  assetId: string;
+  target: PlaybackSpeedTarget;
 };
 
 export type TextOverlayTarget = {
@@ -198,6 +232,9 @@ export type ProcessingJob = {
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions
+    | ExtractAudioJobOptions
+    | EditAudioTrackJobOptions
+    | ChangeSpeedJobOptions
     | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
@@ -213,6 +250,9 @@ export type QueueJobData = {
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions
+    | ExtractAudioJobOptions
+    | EditAudioTrackJobOptions
+    | ChangeSpeedJobOptions
     | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;

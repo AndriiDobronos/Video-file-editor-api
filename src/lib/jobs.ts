@@ -8,9 +8,12 @@ import {
   resolveSupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  ChangeSpeedJobOptions,
   CompressVideoJobOptions,
   ConvertImageJobOptions,
   CropPadJobOptions,
+  EditAudioTrackJobOptions,
+  ExtractAudioJobOptions,
   ExtractFrameJobOptions,
   JobProgress,
   MergeJobOptions,
@@ -125,6 +128,18 @@ const mergeCompatibilityChecks: MergeCompatibilityCheck[] = [
       asset.metadata?.audioChannels ? String(asset.metadata.audioChannels) : "unknown",
   },
 ];
+
+function isVideoStoredAsset(asset: StoredMediaAsset) {
+  return Boolean(asset.metadata?.videoCodec) || isVideoAssetLike({ mimeType: asset.mimeType });
+}
+
+function hasAudioStream(asset: StoredMediaAsset) {
+  return Boolean(asset.metadata?.audioCodec) || asset.mimeType.toLowerCase().startsWith("audio/");
+}
+
+function isTimedMediaAsset(asset: StoredMediaAsset) {
+  return isVideoStoredAsset(asset) || hasAudioStream(asset);
+}
 
 function validateMergeSourceAssets(sourceAssets: StoredMediaAsset[]) {
   const issues = mergeCompatibilityChecks.flatMap((check) => {
@@ -391,6 +406,175 @@ export async function createExtractFrameJob(
       {
         jobId: job.id,
         type: "extract-frame",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createExtractAudioJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: ExtractAudioJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!isVideoStoredAsset(sourceAsset)) {
+    throw new Error("Audio extraction currently requires a video source.");
+  }
+
+  if (!hasAudioStream(sourceAsset)) {
+    throw new Error("The selected video does not contain an audio track to extract.");
+  }
+
+  const job = createQueuedJobRecord("extract-audio", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "extract-audio",
+      {
+        jobId: job.id,
+        type: "extract-audio",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createEditAudioTrackJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: EditAudioTrackJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!isVideoStoredAsset(sourceAsset)) {
+    throw new Error("Mute / replace audio currently requires a video source.");
+  }
+
+  if (options.target.mode === "mute") {
+    const job = createQueuedJobRecord("edit-audio-track", [options.assetId], options);
+    await persistJob(redis, job);
+
+    try {
+      await queue.add(
+        "edit-audio-track",
+        {
+          jobId: job.id,
+          type: "edit-audio-track",
+          sourceAssetIds: [options.assetId],
+          options,
+        },
+        {
+          jobId: job.id,
+        },
+      );
+    } catch (error) {
+      await markJobFailed(
+        redis,
+        job.id,
+        error instanceof Error ? error.message : "Redis queue enqueue failed.",
+        0,
+      );
+      throw error;
+    }
+
+    return toJobDto(job);
+  }
+
+  if (!options.target.replacementAssetId) {
+    throw new Error("Choose a replacement audio source before queueing the job.");
+  }
+
+  const replacementAsset = await getAssetOrThrow(redis, options.target.replacementAssetId);
+
+  if (!hasAudioStream(replacementAsset)) {
+    throw new Error("The selected replacement file does not contain an audio stream.");
+  }
+
+  const sourceAssetIds = [options.assetId, options.target.replacementAssetId];
+  const job = createQueuedJobRecord("edit-audio-track", sourceAssetIds, options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "edit-audio-track",
+      {
+        jobId: job.id,
+        type: "edit-audio-track",
+        sourceAssetIds,
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createChangeSpeedJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: ChangeSpeedJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!isTimedMediaAsset(sourceAsset)) {
+    throw new Error("Speed change currently supports video files and audio files only.");
+  }
+
+  if (options.target.rate < 0.25 || options.target.rate > 4) {
+    throw new Error("Speed change rate must stay between 0.25x and 4x.");
+  }
+
+  const job = createQueuedJobRecord("change-speed", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "change-speed",
+      {
+        jobId: job.id,
+        type: "change-speed",
         sourceAssetIds: [options.assetId],
         options,
       },

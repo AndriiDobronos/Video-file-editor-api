@@ -11,6 +11,8 @@ import {
   type SupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  AudioExtractFormat,
+  ChangeSpeedJobOptions,
   CompressVideoJobOptions,
   ConvertImageJobOptions,
   ConvertImageFit,
@@ -18,12 +20,15 @@ import type {
   CropPadAnchorX,
   CropPadAnchorY,
   CropPadJobOptions,
+  EditAudioTrackJobOptions,
+  ExtractAudioJobOptions,
   ExtractFrameJobOptions,
   JobProgress,
   MediaMetadata,
   MergeJobOptions,
   NormalizeJobOptions,
   OverlayTextJobOptions,
+  PlaybackSpeedTarget,
   StoredMediaAsset,
   TextOverlayHorizontal,
   TextOverlayTarget,
@@ -210,6 +215,62 @@ function buildCompressedVideoOutputName(sourceAsset: StoredMediaAsset) {
   return `${baseName}-compressed.mp4`;
 }
 
+function getAudioExtractExtension(format: AudioExtractFormat) {
+  if (format === "m4a") {
+    return ".m4a";
+  }
+
+  if (format === "wav") {
+    return ".wav";
+  }
+
+  return ".mp3";
+}
+
+function getAudioExtractMimeType(format: AudioExtractFormat) {
+  if (format === "m4a") {
+    return "audio/mp4";
+  }
+
+  if (format === "wav") {
+    return "audio/wav";
+  }
+
+  return "audio/mpeg";
+}
+
+function buildExtractAudioOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: ExtractAudioJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "extracted-audio";
+  return `${baseName}-audio${getAudioExtractExtension(options.target.format)}`;
+}
+
+function buildAudioTrackOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: EditAudioTrackJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "audio-edited-video";
+
+  return options.target.mode === "mute"
+    ? `${baseName}-muted.mp4`
+    : `${baseName}-replaced-audio.mp4`;
+}
+
+function buildChangeSpeedOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: ChangeSpeedJobOptions,
+  extension: string,
+) {
+  const sourceExtension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, sourceExtension) || "speed-changed";
+  const speedLabel = options.target.rate.toFixed(2).replace(/[^\d]+/g, "-");
+  return `${baseName}-speed-${speedLabel}${extension}`;
+}
+
 function buildConvertedImageOutputName(
   sourceAsset: StoredMediaAsset,
   options: ConvertImageJobOptions,
@@ -281,6 +342,37 @@ const simpleCompressionProfiles: Record<VideoCompressionPreset, CompressionProfi
     audioBitrateKbps: 96,
   },
 };
+
+function isVideoStoredAsset(asset: StoredMediaAsset) {
+  return Boolean(asset.metadata?.videoCodec) || isVideoAssetLike({ mimeType: asset.mimeType });
+}
+
+function hasAudioStream(asset: StoredMediaAsset) {
+  return Boolean(asset.metadata?.audioCodec) || asset.mimeType.toLowerCase().startsWith("audio/");
+}
+
+function isAudioOnlyStoredAsset(asset: StoredMediaAsset) {
+  return hasAudioStream(asset) && !isVideoStoredAsset(asset);
+}
+
+function buildAtempoFilter(rate: number) {
+  const factors: number[] = [];
+  let remaining = rate;
+
+  while (remaining < 0.5) {
+    factors.push(0.5);
+    remaining /= 0.5;
+  }
+
+  while (remaining > 2) {
+    factors.push(2);
+    remaining /= 2;
+  }
+
+  factors.push(Number(remaining.toFixed(6)));
+
+  return factors.map((factor) => `atempo=${factor}`).join(",");
+}
 
 function resolveCompressionProfile(options: CompressVideoJobOptions): CompressionProfile {
   if (options.target.mode === "simple") {
@@ -882,6 +974,248 @@ export async function processExtractFrameJob(
       filePath: outputFilePath,
       originalName: buildExtractFrameOutputName(sourceAsset, options),
       mimeType: getTargetImageMimeType(options.target.format),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processExtractAudioJob(
+  redis: Redis,
+  options: ExtractAudioJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath(
+    "extract-audio",
+    getAudioExtractExtension(options.target.format),
+  );
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "extract-audio-sources",
+  );
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = [
+      "-y",
+      "-i",
+      stagedSourceAsset.localFilePath,
+      "-map",
+      "0:a:0",
+      "-vn",
+    ];
+
+    if (options.target.format === "m4a") {
+      ffmpegArgs.push("-c:a", "aac", "-b:a", "192k");
+    } else if (options.target.format === "wav") {
+      ffmpegArgs.push("-c:a", "pcm_s16le");
+    } else {
+      ffmpegArgs.push("-c:a", "libmp3lame", "-q:a", "2");
+    }
+
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildExtractAudioOutputName(sourceAsset, options),
+      mimeType: getAudioExtractMimeType(options.target.format),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processEditAudioTrackJob(
+  redis: Redis,
+  options: EditAudioTrackJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const stagedAssets: StagedProcessingAsset[] = [];
+  const outputFilePath = buildOutputFilePath("audio-track");
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const stagedSourceAsset = await stageAssetForProcessing(
+      sourceAsset,
+      "audio-track-sources",
+    );
+    stagedAssets.push(stagedSourceAsset);
+
+    const ffmpegArgs = ["-y", "-i", stagedSourceAsset.localFilePath];
+
+    if (options.target.mode === "replace") {
+      if (!options.target.replacementAssetId) {
+        throw new Error("Replacement audio source is required.");
+      }
+
+      const replacementAsset = await getAssetOrThrow(redis, options.target.replacementAssetId);
+      const stagedReplacementAsset = await stageAssetForProcessing(
+        replacementAsset,
+        "audio-track-replacements",
+      );
+      stagedAssets.push(stagedReplacementAsset);
+
+      if (options.target.loopReplacement !== false) {
+        ffmpegArgs.push("-stream_loop", "-1");
+      }
+
+      ffmpegArgs.push("-i", stagedReplacementAsset.localFilePath);
+    }
+
+    ffmpegArgs.push(
+      "-map",
+      "0:v:0?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+    );
+
+    if (options.target.mode === "mute") {
+      ffmpegArgs.push("-an");
+    } else {
+      ffmpegArgs.push(
+        "-map",
+        "1:a:0?",
+        "-c:a",
+        "aac",
+        "-shortest",
+      );
+    }
+
+    ffmpegArgs.push("-movflags", "+faststart", outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildAudioTrackOutputName(sourceAsset, options),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupStagedAssets(stagedAssets);
+  }
+}
+
+export async function processChangeSpeedJob(
+  redis: Redis,
+  options: ChangeSpeedJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const isVideoSource = isVideoStoredAsset(sourceAsset);
+  const isAudioOnlySource = isAudioOnlyStoredAsset(sourceAsset);
+  const hasSourceAudio = hasAudioStream(sourceAsset);
+  const outputExtension = isVideoSource ? ".mp4" : ".mp3";
+  const outputFilePath = buildOutputFilePath("change-speed", outputExtension);
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "change-speed-sources",
+  );
+  const rate = Number(options.target.rate.toFixed(6));
+  const atempoFilter = buildAtempoFilter(rate);
+
+  if (!isVideoSource && !isAudioOnlySource) {
+    throw new Error("Speed change currently supports video files and audio files only.");
+  }
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = ["-y", "-i", stagedSourceAsset.localFilePath];
+
+    if (isVideoSource) {
+      ffmpegArgs.push(
+        "-map",
+        "0:v:0?",
+        "-vf",
+        `setpts=PTS/${rate}`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+      );
+
+      if (hasSourceAudio) {
+        ffmpegArgs.push(
+          "-map",
+          "0:a:0?",
+          "-af",
+          atempoFilter,
+          "-c:a",
+          "aac",
+        );
+      } else {
+        ffmpegArgs.push("-an");
+      }
+
+      ffmpegArgs.push("-movflags", "+faststart");
+    } else {
+      ffmpegArgs.push(
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-af",
+        atempoFilter,
+        "-c:a",
+        "libmp3lame",
+        "-q:a",
+        "2",
+      );
+    }
+
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildChangeSpeedOutputName(sourceAsset, options, outputExtension),
+      mimeType: isVideoSource ? undefined : "audio/mpeg",
     });
 
     await reportProgress(onProgress, 100);

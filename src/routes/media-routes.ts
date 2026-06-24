@@ -14,9 +14,12 @@ import {
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  createChangeSpeedJob,
   createCompressVideoJob,
   createConvertImageJob,
   createCropPadJob,
+  createEditAudioTrackJob,
+  createExtractAudioJob,
   createExtractFrameJob,
   createMergeJob,
   createNormalizeJob,
@@ -114,6 +117,29 @@ const extractFrameJobSchema = z.object({
     height: z.number().int().positive().optional(),
     fit: z.enum(["contain", "cover", "stretch"]).optional(),
     background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  }),
+});
+
+const extractAudioJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    format: z.enum(["mp3", "m4a", "wav"]),
+  }),
+});
+
+const editAudioTrackJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    mode: z.enum(["mute", "replace"]),
+    replacementAssetId: z.string().min(1).optional(),
+    loopReplacement: z.boolean().optional(),
+  }),
+});
+
+const changeSpeedJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    rate: z.number().min(0.25).max(4),
   }),
 });
 
@@ -496,6 +522,78 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Extract frame job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/extract-audio", async (request, reply) => {
+    const parsedBody = extractAudioJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Extract audio payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createExtractAudioJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Extract audio job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/edit-audio-track", async (request, reply) => {
+    const parsedBody = editAudioTrackJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Audio track payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createEditAudioTrackJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Audio track job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/change-speed", async (request, reply) => {
+    const parsedBody = changeSpeedJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Change speed payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createChangeSpeedJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Change speed job could not be queued.",
       });
     }
   });
