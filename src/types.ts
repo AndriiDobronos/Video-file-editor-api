@@ -4,6 +4,7 @@ export type MediaStorageDriver = "local" | "r2";
 export type JobType =
   | "trim"
   | "merge"
+  | "transition-merge"
   | "normalize"
   | "compress-video"
   | "extract-frame"
@@ -67,6 +68,20 @@ export type TrimJobOptions = {
 
 export type MergeJobOptions = {
   sourceAssetIds: string[];
+};
+
+export type TransitionMergeType = "crossfade" | "fade-black";
+export type TransitionMergeAudioMode = "crossfade" | "hard-cut";
+
+export type TransitionMergeTarget = {
+  transition: TransitionMergeType;
+  overlapSeconds: number;
+  audioMode: TransitionMergeAudioMode;
+};
+
+export type TransitionMergeJobOptions = {
+  sourceAssetIds: [string, string];
+  target: TransitionMergeTarget;
 };
 
 export type NormalizeTargetPreset =
@@ -243,6 +258,7 @@ export type ProcessingJob = {
   options:
     | TrimJobOptions
     | MergeJobOptions
+    | TransitionMergeJobOptions
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions
@@ -262,6 +278,7 @@ export type QueueJobData = {
   options:
     | TrimJobOptions
     | MergeJobOptions
+    | TransitionMergeJobOptions
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions

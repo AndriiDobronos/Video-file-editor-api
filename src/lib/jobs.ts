@@ -24,6 +24,7 @@ import type {
   QueueJobData,
   QueueJobResult,
   StoredMediaAsset,
+  TransitionMergeJobOptions,
   TrimJobOptions,
 } from "../types.js";
 import { getAssetOrThrow } from "./filesystem.js";
@@ -173,6 +174,78 @@ function validateMergeSourceAssets(sourceAssets: StoredMediaAsset[]) {
   );
 }
 
+function validateTransitionSourceAssets(
+  sourceAssets: StoredMediaAsset[],
+  options: TransitionMergeJobOptions,
+) {
+  if (sourceAssets.length !== 2) {
+    throw new Error("Transition merge currently requires exactly two source clips.");
+  }
+
+  for (const asset of sourceAssets) {
+    if (!isVideoStoredAsset(asset)) {
+      throw new Error("Transition merge currently requires video clips only.");
+    }
+
+    if (
+      asset.metadata?.durationSeconds === null ||
+      asset.metadata?.durationSeconds === undefined
+    ) {
+      throw new Error(
+        `Clip "${asset.originalName}" is missing duration metadata. Re-upload it before transition merge.`,
+      );
+    }
+  }
+
+  const minDuration = Math.min(
+    sourceAssets[0].metadata?.durationSeconds ?? 0,
+    sourceAssets[1].metadata?.durationSeconds ?? 0,
+  );
+
+  if (options.target.overlapSeconds <= 0) {
+    throw new Error("Transition overlap must be greater than zero.");
+  }
+
+  if (options.target.overlapSeconds >= minDuration) {
+    throw new Error("Transition overlap must stay shorter than the shortest selected clip.");
+  }
+
+  const transitionCompatibilityLabels = new Set([
+    "resolution",
+    "frame rate",
+    "audio sample rate",
+    "audio channels",
+  ]);
+  const issues = mergeCompatibilityChecks
+    .filter((check) => transitionCompatibilityLabels.has(check.label))
+    .flatMap((check) => {
+      const values = new Map<string, string[]>();
+
+      for (const asset of sourceAssets) {
+        const value = check.readValue(asset);
+        const assetLabels = values.get(value) ?? [];
+        assetLabels.push(asset.originalName);
+        values.set(value, assetLabels);
+      }
+
+      if (values.size <= 1) {
+        return [];
+      }
+
+      return [
+        `${check.label}: ${Array.from(values.entries())
+          .map(([value, assets]) => `${value} (${assets.join(", ")})`)
+          .join("; ")}`,
+      ];
+    });
+
+  if (issues.length > 0) {
+    throw new Error(
+      `Transition merge source assets are incompatible. Normalize the clips to the same format before adding an overlap transition. Conflicting settings: ${issues.join(" | ")}.`,
+    );
+  }
+}
+
 export async function listJobDtos(redis: Redis) {
   const jobIds = await redis.zrevrange(serverConfig.redisKeys.jobIndex, 0, -1);
   const jobs = await getManyJsonRecords<ProcessingJob>(
@@ -271,6 +344,58 @@ export async function createMergeJob(
         sourceAssetIds,
         options: {
           sourceAssetIds,
+        },
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createTransitionMergeJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: TransitionMergeJobOptions,
+) {
+  const uniqueAssetIds = new Set(options.sourceAssetIds);
+
+  if (uniqueAssetIds.size !== 2) {
+    throw new Error("Choose two different clips before queueing a transition merge.");
+  }
+
+  const sourceAssets = await Promise.all(
+    options.sourceAssetIds.map((assetId) => getAssetOrThrow(redis, assetId)),
+  );
+  validateTransitionSourceAssets(sourceAssets, options);
+
+  const sourceAssetIds = [...options.sourceAssetIds] as [string, string];
+  const job = createQueuedJobRecord("transition-merge", [...sourceAssetIds], {
+    sourceAssetIds,
+    target: options.target,
+  });
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "transition-merge",
+      {
+        jobId: job.id,
+        type: "transition-merge",
+        sourceAssetIds: [...sourceAssetIds],
+        options: {
+          sourceAssetIds,
+          target: options.target,
         },
       },
       {

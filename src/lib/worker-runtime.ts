@@ -21,6 +21,7 @@ import {
   processMergeJob,
   processNormalizeJob,
   processOverlayTextJob,
+  processTransitionMergeJob,
   processTrimJob,
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
@@ -38,6 +39,7 @@ import type {
   NormalizeJobOptions,
   OverlayTextJobOptions,
   QueueJobResult,
+  TransitionMergeJobOptions,
   TrimJobOptions,
 } from "../types.js";
 
@@ -75,6 +77,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processMergeJob(
           redis,
           job.data.options as MergeJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "transition-merge") {
+        const outputAsset = await processTransitionMergeJob(
+          redis,
+          job.data.options as TransitionMergeJobOptions,
           reportProgress,
         );
 

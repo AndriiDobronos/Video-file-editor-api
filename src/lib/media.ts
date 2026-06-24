@@ -35,6 +35,8 @@ import type {
   TextOverlayHorizontal,
   TextOverlayTarget,
   TextOverlayVertical,
+  TransitionMergeJobOptions,
+  TransitionMergeType,
   TrimJobOptions,
   VideoCompressionEncoderPreset,
   VideoCompressionPreset,
@@ -202,6 +204,17 @@ function buildMergeOutputName() {
   return `merged-${new Date().toISOString().replace(/[:.]/g, "-")}.mp4`;
 }
 
+function buildTransitionMergeOutputName(sourceAssets: [StoredMediaAsset, StoredMediaAsset]) {
+  const firstBaseName =
+    path.basename(sourceAssets[0].originalName, path.extname(sourceAssets[0].originalName)) ||
+    "clip-a";
+  const secondBaseName =
+    path.basename(sourceAssets[1].originalName, path.extname(sourceAssets[1].originalName)) ||
+    "clip-b";
+
+  return `${firstBaseName}-to-${secondBaseName}-transition.mp4`;
+}
+
 function buildNormalizedOutputName(
   sourceAsset: StoredMediaAsset,
   options: NormalizeJobOptions,
@@ -360,6 +373,49 @@ function buildTextOverlayOutputName(sourceAsset: StoredMediaAsset) {
   const extension = path.extname(sourceAsset.originalName);
   const baseName = path.basename(sourceAsset.originalName, extension) || "text-overlay";
   return `${baseName}-text-overlay.mp4`;
+}
+
+function parseFrameRateValue(frameRate: string | null | undefined) {
+  if (!frameRate) {
+    return null;
+  }
+
+  const [numerator, denominator] = frameRate.split("/");
+
+  if (!numerator || !denominator) {
+    const parsed = Number(frameRate);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  const numeratorValue = Number(numerator);
+  const denominatorValue = Number(denominator);
+
+  if (
+    !Number.isFinite(numeratorValue) ||
+    !Number.isFinite(denominatorValue) ||
+    denominatorValue === 0
+  ) {
+    return null;
+  }
+
+  const parsed = numeratorValue / denominatorValue;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getTransitionName(value: TransitionMergeType) {
+  return value === "fade-black" ? "fadeblack" : "fade";
+}
+
+function buildTransitionAudioInputFilter(input: {
+  index: number;
+  asset: StoredMediaAsset;
+  durationSeconds: number;
+}) {
+  if (hasAudioStream(input.asset)) {
+    return `[${input.index}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a${input.index}full]`;
+  }
+
+  return `anullsrc=r=48000:cl=stereo,atrim=duration=${input.durationSeconds},asetpts=N/SR/TB[a${input.index}full]`;
 }
 
 function formatAudioVolumeGain(gainDb: number) {
@@ -1635,5 +1691,106 @@ export async function processMergeJob(
       unlink(concatFilePath).catch(() => undefined),
       cleanupStagedAssets(stagedSourceAssets),
     ]);
+  }
+}
+
+export async function processTransitionMergeJob(
+  redis: Redis,
+  options: TransitionMergeJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAssets = (await Promise.all(
+    options.sourceAssetIds.map((assetId) => getAssetOrThrow(redis, assetId)),
+  )) as [StoredMediaAsset, StoredMediaAsset];
+  const stagedSourceAssets = (await Promise.all(
+    sourceAssets.map((asset) => stageAssetForProcessing(asset, "transition-merge-sources")),
+  )) as [StagedProcessingAsset, StagedProcessingAsset];
+  const outputFilePath = buildOutputFilePath("transition-merge");
+  const firstDuration = sourceAssets[0].metadata?.durationSeconds ?? null;
+  const secondDuration = sourceAssets[1].metadata?.durationSeconds ?? null;
+
+  if (!firstDuration || !secondDuration) {
+    throw new Error("Transition merge requires both selected clips to have duration metadata.");
+  }
+
+  const overlapSeconds = Number(options.target.overlapSeconds.toFixed(3));
+  const transitionOffset = Number((firstDuration - overlapSeconds).toFixed(3));
+  const transitionName = getTransitionName(options.target.transition);
+  const frameRate = parseFrameRateValue(sourceAssets[0].metadata?.frameRate) ?? 30;
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const filterSteps = [
+      `[0:v]fps=${frameRate},format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS[v0]`,
+      `[1:v]fps=${frameRate},format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS[v1]`,
+      `[v0][v1]xfade=transition=${transitionName}:duration=${overlapSeconds}:offset=${transitionOffset}[vout]`,
+      buildTransitionAudioInputFilter({
+        index: 0,
+        asset: sourceAssets[0],
+        durationSeconds: firstDuration,
+      }),
+      buildTransitionAudioInputFilter({
+        index: 1,
+        asset: sourceAssets[1],
+        durationSeconds: secondDuration,
+      }),
+    ];
+
+    if (options.target.audioMode === "crossfade") {
+      filterSteps.push(
+        `[a0full][a1full]acrossfade=d=${overlapSeconds}:c1=tri:c2=tri[aout]`,
+      );
+    } else {
+      filterSteps.push(
+        `[a0full]atrim=0:${transitionOffset},asetpts=PTS-STARTPTS[a0cut]`,
+        `[a0cut][a1full]concat=n=2:v=0:a=1[aout]`,
+      );
+    }
+
+    await reportProgress(onProgress, 25);
+
+    await runCommand("ffmpeg", [
+      "-y",
+      "-i",
+      stagedSourceAssets[0].localFilePath,
+      "-i",
+      stagedSourceAssets[1].localFilePath,
+      "-filter_complex",
+      filterSteps.join(";"),
+      "-map",
+      "[vout]",
+      "-map",
+      "[aout]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-movflags",
+      "+faststart",
+      outputFilePath,
+    ]);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildTransitionMergeOutputName(sourceAssets),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupStagedAssets(stagedSourceAssets);
   }
 }

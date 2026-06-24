@@ -25,6 +25,7 @@ import {
   createMergeJob,
   createNormalizeJob,
   createOverlayTextJob,
+  createTransitionMergeJob,
   createTrimJob,
   getJobDto,
   listJobDtos,
@@ -55,6 +56,15 @@ const trimJobSchema = z.object({
 
 const mergeJobSchema = z.object({
   sourceAssetIds: z.array(z.string().min(1)).min(2),
+});
+
+const transitionMergeJobSchema = z.object({
+  sourceAssetIds: z.tuple([z.string().min(1), z.string().min(1)]),
+  target: z.object({
+    transition: z.enum(["crossfade", "fade-black"]),
+    overlapSeconds: z.number().gt(0),
+    audioMode: z.enum(["crossfade", "hard-cut"]),
+  }),
 });
 
 const normalizeJobSchema = z.object({
@@ -471,6 +481,34 @@ export async function registerMediaRoutes(
     } catch (error) {
       return reply.code(400).send({
         message: error instanceof Error ? error.message : "Merge job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/transition-merge", async (request, reply) => {
+    const parsedBody = transitionMergeJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Transition merge payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createTransitionMergeJob(
+        deps.redis,
+        deps.queue,
+        parsedBody.data,
+      );
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Transition merge job could not be queued.",
       });
     }
   });
