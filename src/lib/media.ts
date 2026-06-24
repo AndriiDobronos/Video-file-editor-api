@@ -11,6 +11,7 @@ import {
   type SupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  AudioVolumeJobOptions,
   AudioExtractFormat,
   ChangeSpeedJobOptions,
   CompressVideoJobOptions,
@@ -29,6 +30,7 @@ import type {
   NormalizeJobOptions,
   OverlayTextJobOptions,
   PlaybackSpeedTarget,
+  AudioVolumeTarget,
   StoredMediaAsset,
   TextOverlayHorizontal,
   TextOverlayTarget,
@@ -271,6 +273,57 @@ function buildChangeSpeedOutputName(
   return `${baseName}-speed-${speedLabel}${extension}`;
 }
 
+function getAudioVolumeOutputDescriptor(sourceAsset: StoredMediaAsset) {
+  const mimeType = sourceAsset.mimeType.toLowerCase();
+  const extension = path.extname(sourceAsset.originalName).toLowerCase();
+
+  if (mimeType === "audio/wav" || extension === ".wav") {
+    return {
+      extension: ".wav",
+      mimeType: "audio/wav",
+      codecArgs: ["-c:a", "pcm_s16le"],
+    };
+  }
+
+  if (
+    mimeType === "audio/mp4" ||
+    mimeType === "audio/aac" ||
+    extension === ".m4a" ||
+    extension === ".aac"
+  ) {
+    return {
+      extension: ".m4a",
+      mimeType: "audio/mp4",
+      codecArgs: ["-c:a", "aac", "-b:a", "192k"],
+    };
+  }
+
+  return {
+    extension: ".mp3",
+    mimeType: "audio/mpeg",
+    codecArgs: ["-c:a", "libmp3lame", "-q:a", "2"],
+  };
+}
+
+function buildAudioVolumeOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: AudioVolumeJobOptions,
+  extension: string,
+) {
+  const sourceExtension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, sourceExtension) || "audio-volume";
+
+  if (options.target.mute) {
+    return `${baseName}-muted${extension}`;
+  }
+
+  const gainDb = Number((options.target.gainDb ?? 0).toFixed(2));
+  const polarity = gainDb < 0 ? "minus" : gainDb > 0 ? "plus" : "same";
+  const amount = Math.abs(gainDb).toString().replace(/[^\d]+/g, "-");
+
+  return `${baseName}-volume-${polarity}-${amount || "0"}db${extension}`;
+}
+
 function buildConvertedImageOutputName(
   sourceAsset: StoredMediaAsset,
   options: ConvertImageJobOptions,
@@ -307,6 +360,28 @@ function buildTextOverlayOutputName(sourceAsset: StoredMediaAsset) {
   const extension = path.extname(sourceAsset.originalName);
   const baseName = path.basename(sourceAsset.originalName, extension) || "text-overlay";
   return `${baseName}-text-overlay.mp4`;
+}
+
+function formatAudioVolumeGain(gainDb: number) {
+  const normalized = Number(gainDb.toFixed(2));
+
+  return normalized.toString().replace(/\.?0+$/, "");
+}
+
+function buildAudioVolumeFilter(target: AudioVolumeTarget) {
+  const gainExpression = target.mute ? "0" : `${formatAudioVolumeGain(target.gainDb ?? 0)}dB`;
+  const hasTimedRange =
+    typeof target.startTime === "number" && typeof target.endTime === "number";
+
+  const volumeFilter = hasTimedRange
+    ? `volume=${gainExpression}:enable='between(t,${target.startTime},${target.endTime})'`
+    : `volume=${gainExpression}`;
+
+  if (target.preventClipping) {
+    return `${volumeFilter},alimiter=limit=0.95`;
+  }
+
+  return volumeFilter;
 }
 
 type StillImageTargetInput = {
@@ -1216,6 +1291,93 @@ export async function processChangeSpeedJob(
       filePath: outputFilePath,
       originalName: buildChangeSpeedOutputName(sourceAsset, options, outputExtension),
       mimeType: isVideoSource ? undefined : "audio/mpeg",
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processAudioVolumeJob(
+  redis: Redis,
+  options: AudioVolumeJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const isVideoSource = isVideoStoredAsset(sourceAsset);
+  const hasSourceAudio = hasAudioStream(sourceAsset);
+  const audioOutputDescriptor = isVideoSource
+    ? null
+    : getAudioVolumeOutputDescriptor(sourceAsset);
+  const outputExtension = isVideoSource
+    ? ".mp4"
+    : (audioOutputDescriptor?.extension ?? ".mp3");
+  const outputFilePath = buildOutputFilePath("audio-volume", outputExtension);
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "audio-volume-sources",
+  );
+  const audioFilter = buildAudioVolumeFilter(options.target);
+
+  if (!hasSourceAudio) {
+    throw new Error("Audio volume currently requires a file that already contains audio.");
+  }
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    const ffmpegArgs = ["-y", "-i", stagedSourceAsset.localFilePath];
+
+    if (isVideoSource) {
+      ffmpegArgs.push(
+        "-map",
+        "0:v:0?",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-af",
+        audioFilter,
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+      );
+    } else {
+      ffmpegArgs.push(
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-af",
+        audioFilter,
+        ...(audioOutputDescriptor?.codecArgs ?? ["-c:a", "libmp3lame", "-q:a", "2"]),
+      );
+    }
+
+    ffmpegArgs.push(outputFilePath);
+
+    await runCommand("ffmpeg", ffmpegArgs);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildAudioVolumeOutputName(sourceAsset, options, outputExtension),
+      mimeType: isVideoSource ? undefined : audioOutputDescriptor?.mimeType,
     });
 
     await reportProgress(onProgress, 100);

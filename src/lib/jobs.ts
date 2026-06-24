@@ -8,6 +8,7 @@ import {
   resolveSupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  AudioVolumeJobOptions,
   ChangeSpeedJobOptions,
   CompressVideoJobOptions,
   ConvertImageJobOptions,
@@ -575,6 +576,88 @@ export async function createChangeSpeedJob(
       {
         jobId: job.id,
         type: "change-speed",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createAudioVolumeJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: AudioVolumeJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const duration = sourceAsset.metadata?.durationSeconds;
+
+  if (!hasAudioStream(sourceAsset)) {
+    throw new Error("Audio volume currently requires a file that already contains audio.");
+  }
+
+  if (options.target.mute !== true) {
+    if (typeof options.target.gainDb !== "number") {
+      throw new Error("Choose a gain value in dB or use mute before queueing the job.");
+    }
+
+    if (options.target.gainDb < -30 || options.target.gainDb > 20) {
+      throw new Error("Audio gain must stay between -30 dB and +20 dB.");
+    }
+  }
+
+  const hasStartTime = typeof options.target.startTime === "number";
+  const hasEndTime = typeof options.target.endTime === "number";
+
+  if (hasStartTime !== hasEndTime) {
+    throw new Error("Custom audio volume ranges require both a start time and an end time.");
+  }
+
+  if (hasStartTime && hasEndTime) {
+    if ((options.target.startTime ?? 0) < 0) {
+      throw new Error("Audio volume start time must be zero or greater.");
+    }
+
+    if ((options.target.endTime ?? 0) <= (options.target.startTime ?? 0)) {
+      throw new Error("Audio volume end time must be greater than the start time.");
+    }
+
+    if (
+      typeof duration === "number" &&
+      (options.target.startTime ?? 0) > duration
+    ) {
+      throw new Error("Audio volume start time cannot be greater than the source duration.");
+    }
+
+    if (
+      typeof duration === "number" &&
+      (options.target.endTime ?? 0) > duration
+    ) {
+      throw new Error("Audio volume end time cannot be greater than the source duration.");
+    }
+  }
+
+  const job = createQueuedJobRecord("audio-volume", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "audio-volume",
+      {
+        jobId: job.id,
+        type: "audio-volume",
         sourceAssetIds: [options.assetId],
         options,
       },

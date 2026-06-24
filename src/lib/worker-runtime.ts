@@ -10,6 +10,7 @@ import {
   updateJobProgress,
 } from "./jobs.js";
 import {
+  processAudioVolumeJob,
   processChangeSpeedJob,
   processCompressVideoJob,
   processConvertImageJob,
@@ -24,6 +25,7 @@ import {
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
+  AudioVolumeJobOptions,
   ChangeSpeedJobOptions,
   CompressVideoJobOptions,
   ConvertImageJobOptions,
@@ -151,6 +153,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processChangeSpeedJob(
           redis,
           job.data.options as ChangeSpeedJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "audio-volume") {
+        const outputAsset = await processAudioVolumeJob(
+          redis,
+          job.data.options as AudioVolumeJobOptions,
           reportProgress,
         );
 

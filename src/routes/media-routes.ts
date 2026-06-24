@@ -14,6 +14,7 @@ import {
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  createAudioVolumeJob,
   createChangeSpeedJob,
   createCompressVideoJob,
   createConvertImageJob,
@@ -141,6 +142,50 @@ const changeSpeedJobSchema = z.object({
   target: z.object({
     rate: z.number().min(0.25).max(4),
   }),
+});
+
+const audioVolumeJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z
+    .object({
+      gainDb: z.number().min(-30).max(20).optional(),
+      mute: z.boolean().optional(),
+      startTime: z.number().min(0).optional(),
+      endTime: z.number().gt(0).optional(),
+      preventClipping: z.boolean().optional(),
+    })
+    .superRefine((target, context) => {
+      if (target.mute !== true && typeof target.gainDb !== "number") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide a gain value in dB or choose mute.",
+          path: ["gainDb"],
+        });
+      }
+
+      const hasStartTime = typeof target.startTime === "number";
+      const hasEndTime = typeof target.endTime === "number";
+
+      if (hasStartTime !== hasEndTime) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Custom ranges require both a start time and an end time.",
+          path: ["startTime"],
+        });
+      }
+
+      if (
+        typeof target.startTime === "number" &&
+        typeof target.endTime === "number" &&
+        target.endTime <= target.startTime
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "End time must be greater than start time.",
+          path: ["endTime"],
+        });
+      }
+    }),
 });
 
 const overlayTextJobSchema = z.object({
@@ -594,6 +639,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Change speed job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/audio-volume", async (request, reply) => {
+    const parsedBody = audioVolumeJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Audio volume payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createAudioVolumeJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Audio volume job could not be queued.",
       });
     }
   });

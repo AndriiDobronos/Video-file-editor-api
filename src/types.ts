@@ -10,6 +10,7 @@ export type JobType =
   | "extract-audio"
   | "edit-audio-track"
   | "change-speed"
+  | "audio-volume"
   | "overlay-text"
   | "crop-pad"
   | "convert-image";
@@ -183,6 +184,19 @@ export type ChangeSpeedJobOptions = {
   target: PlaybackSpeedTarget;
 };
 
+export type AudioVolumeTarget = {
+  gainDb?: number;
+  mute?: boolean;
+  startTime?: number;
+  endTime?: number;
+  preventClipping?: boolean;
+};
+
+export type AudioVolumeJobOptions = {
+  assetId: string;
+  target: AudioVolumeTarget;
+};
+
 export type TextOverlayTarget = {
   text: string;
   startTime?: number;
@@ -235,6 +249,7 @@ export type ProcessingJob = {
     | ExtractAudioJobOptions
     | EditAudioTrackJobOptions
     | ChangeSpeedJobOptions
+    | AudioVolumeJobOptions
     | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
@@ -253,6 +268,7 @@ export type QueueJobData = {
     | ExtractAudioJobOptions
     | EditAudioTrackJobOptions
     | ChangeSpeedJobOptions
+    | AudioVolumeJobOptions
     | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
