@@ -11,6 +11,8 @@ import {
   type SupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  AnimationExportFormat,
+  AnimationExportJobOptions,
   AudioVolumeJobOptions,
   AudioExtractFormat,
   ChangeSpeedJobOptions,
@@ -25,6 +27,8 @@ import type {
   ExtractAudioJobOptions,
   ExtractFrameJobOptions,
   JobProgress,
+  MediaInspection,
+  MediaInspectionStream,
   MediaMetadata,
   MergeJobOptions,
   NormalizeJobOptions,
@@ -51,23 +55,42 @@ import {
 
 type ProbeResult = {
   streams?: Array<{
+    index?: number;
     codec_type?: string;
     codec_name?: string;
+    codec_long_name?: string;
     width?: number;
     height?: number;
+    pix_fmt?: string;
     r_frame_rate?: string;
+    avg_frame_rate?: string;
+    sample_aspect_ratio?: string;
+    display_aspect_ratio?: string;
+    bit_rate?: string;
+    duration?: string;
     sample_rate?: string;
     channels?: number;
+    channel_layout?: string;
+    side_data_list?: Array<{
+      rotation?: number;
+    }>;
+    tags?: {
+      rotate?: string;
+    };
   }>;
   format?: {
     format_name?: string;
+    format_long_name?: string;
     duration?: string;
     size?: string;
     bit_rate?: string;
+    probe_score?: number | string;
   };
 };
 
-function parseNumber(value: string | number | undefined) {
+type ProbeStream = NonNullable<ProbeResult["streams"]>[number];
+
+function parseNumber(value: string | number | undefined | null) {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : null;
   }
@@ -78,6 +101,100 @@ function parseNumber(value: string | number | undefined) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeFrameRateValue(value: string | null | undefined) {
+  if (!value || value === "0/0") {
+    return null;
+  }
+
+  return value;
+}
+
+function parseRotationDegrees(stream: ProbeStream) {
+  const sideDataRotation = stream.side_data_list?.find(
+    (sideData) => typeof sideData.rotation === "number",
+  )?.rotation;
+
+  if (typeof sideDataRotation === "number" && Number.isFinite(sideDataRotation)) {
+    return sideDataRotation;
+  }
+
+  return parseNumber(stream.tags?.rotate);
+}
+
+function toMediaInspectionStream(stream: ProbeStream): MediaInspectionStream {
+  return {
+    index: stream.index ?? 0,
+    codecType: stream.codec_type ?? null,
+    codecName: stream.codec_name ?? null,
+    codecLongName: stream.codec_long_name ?? null,
+    width: stream.width ?? null,
+    height: stream.height ?? null,
+    pixelFormat: stream.pix_fmt ?? null,
+    frameRate: normalizeFrameRateValue(stream.r_frame_rate),
+    averageFrameRate: normalizeFrameRateValue(stream.avg_frame_rate),
+    sampleAspectRatio: stream.sample_aspect_ratio ?? null,
+    displayAspectRatio: stream.display_aspect_ratio ?? null,
+    bitRate: parseNumber(stream.bit_rate),
+    durationSeconds: parseNumber(stream.duration),
+    audioSampleRate: parseNumber(stream.sample_rate),
+    audioChannels: stream.channels ?? null,
+    audioChannelLayout: stream.channel_layout ?? null,
+    rotationDegrees: parseRotationDegrees(stream),
+  };
+}
+
+export function summarizeMediaInspection(inspection: MediaInspection | null): MediaMetadata | null {
+  if (!inspection) {
+    return null;
+  }
+
+  const videoStream = inspection.streams.find((stream) => stream.codecType === "video");
+  const audioStream = inspection.streams.find((stream) => stream.codecType === "audio");
+
+  return {
+    formatName: inspection.formatName,
+    durationSeconds: inspection.durationSeconds,
+    sizeBytes: inspection.sizeBytes,
+    bitRate: inspection.bitRate,
+    width: videoStream?.width ?? null,
+    height: videoStream?.height ?? null,
+    videoCodec: videoStream?.codecName ?? null,
+    audioCodec: audioStream?.codecName ?? null,
+    frameRate: videoStream?.frameRate ?? videoStream?.averageFrameRate ?? null,
+    audioSampleRate: audioStream?.audioSampleRate ?? null,
+    audioChannels: audioStream?.audioChannels ?? null,
+  };
+}
+
+export async function inspectMedia(filePath: string): Promise<MediaInspection | null> {
+  const { stdout } = await runCommand("ffprobe", [
+    "-v",
+    "error",
+    "-print_format",
+    "json",
+    "-show_format",
+    "-show_streams",
+    filePath,
+  ]);
+
+  const parsed = JSON.parse(stdout) as ProbeResult;
+  const streams = parsed.streams?.map(toMediaInspectionStream) ?? [];
+
+  return {
+    formatName: parsed.format?.format_name ?? null,
+    formatLongName: parsed.format?.format_long_name ?? null,
+    durationSeconds: parseNumber(parsed.format?.duration),
+    sizeBytes: parseNumber(parsed.format?.size),
+    bitRate: parseNumber(parsed.format?.bit_rate),
+    probeScore: parseNumber(parsed.format?.probe_score),
+    streamCount: streams.length,
+    videoStreamCount: streams.filter((stream) => stream.codecType === "video").length,
+    audioStreamCount: streams.filter((stream) => stream.codecType === "audio").length,
+    inspectedAt: new Date().toISOString(),
+    streams,
+  };
 }
 
 function buildOutputFilePath(prefix: string, extension = ".mp4") {
@@ -165,33 +282,7 @@ async function reportProgress(
 }
 
 export async function probeMedia(filePath: string): Promise<MediaMetadata | null> {
-  const { stdout } = await runCommand("ffprobe", [
-    "-v",
-    "error",
-    "-print_format",
-    "json",
-    "-show_format",
-    "-show_streams",
-    filePath,
-  ]);
-
-  const parsed = JSON.parse(stdout) as ProbeResult;
-  const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
-  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
-
-  return {
-    formatName: parsed.format?.format_name ?? null,
-    durationSeconds: parseNumber(parsed.format?.duration),
-    sizeBytes: parseNumber(parsed.format?.size),
-    bitRate: parseNumber(parsed.format?.bit_rate),
-    width: videoStream?.width ?? null,
-    height: videoStream?.height ?? null,
-    videoCodec: videoStream?.codec_name ?? null,
-    audioCodec: audioStream?.codec_name ?? null,
-    frameRate: videoStream?.r_frame_rate ?? null,
-    audioSampleRate: parseNumber(audioStream?.sample_rate),
-    audioChannels: audioStream?.channels ?? null,
-  };
+  return summarizeMediaInspection(await inspectMedia(filePath));
 }
 
 function buildTrimOutputName(sourceAsset: StoredMediaAsset) {
@@ -347,6 +438,28 @@ function buildConvertedImageOutputName(
   return `${baseName}-converted${getTargetImageExtension(options.target.format)}`;
 }
 
+function getAnimationExportExtension(format: AnimationExportFormat) {
+  return format === "gif" ? ".gif" : ".webp";
+}
+
+function getAnimationExportMimeType(format: AnimationExportFormat) {
+  return format === "gif" ? "image/gif" : "image/webp";
+}
+
+function buildAnimationExportOutputName(
+  sourceAsset: StoredMediaAsset,
+  options: AnimationExportJobOptions,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "animation-preview";
+  const timestampLabel = options.target.startTime.toFixed(2).replace(/[^\d]+/g, "-");
+  const durationLabel = options.target.durationSeconds.toFixed(2).replace(/[^\d]+/g, "-");
+
+  return `${baseName}-preview-${timestampLabel}-${durationLabel}${getAnimationExportExtension(
+    options.target.format,
+  )}`;
+}
+
 function buildCropPadOutputName(
   sourceAsset: StoredMediaAsset,
   options: CropPadJobOptions,
@@ -367,6 +480,20 @@ function buildExtractFrameOutputName(
   const timestampLabel = options.target.timeSeconds.toFixed(2).replace(/[^\d]+/g, "-");
 
   return `${baseName}-frame-${timestampLabel}${getTargetImageExtension(options.target.format)}`;
+}
+
+function buildAnimationExportFilter(options: AnimationExportJobOptions) {
+  const filters = [`fps=${Math.round(options.target.fps ?? 12)}`];
+
+  if (options.target.width) {
+    filters.push(`scale=${options.target.width}:-1:flags=lanczos`);
+  }
+
+  return filters.join(",");
+}
+
+function getAnimationExportQuality(options: AnimationExportJobOptions) {
+  return Math.max(1, Math.min(100, Math.round(options.target.quality ?? 82)));
 }
 
 function buildTextOverlayOutputName(sourceAsset: StoredMediaAsset) {
@@ -994,6 +1121,86 @@ export async function processCompressVideoJob(
     const outputAsset = await registerOutputAsset(redis, {
       filePath: outputFilePath,
       originalName: buildCompressedVideoOutputName(sourceAsset),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await cleanupTemporaryFile(
+      stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+    );
+  }
+}
+
+export async function processAnimationExportJob(
+  redis: Redis,
+  options: AnimationExportJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath(
+    "animation-export",
+    getAnimationExportExtension(options.target.format),
+  );
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "animation-export-sources",
+  );
+  const animationFilter = buildAnimationExportFilter(options);
+  const quality = getAnimationExportQuality(options);
+
+  await ensureStorageDirectories();
+  await reportProgress(onProgress, 10);
+
+  try {
+    if (options.target.format === "gif") {
+      await runCommand("ffmpeg", [
+        "-y",
+        "-ss",
+        `${options.target.startTime}`,
+        "-t",
+        `${options.target.durationSeconds}`,
+        "-i",
+        stagedSourceAsset.localFilePath,
+        "-vf",
+        `${animationFilter},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`,
+        "-loop",
+        "0",
+        "-an",
+        outputFilePath,
+      ]);
+    } else {
+      await runCommand("ffmpeg", [
+        "-y",
+        "-ss",
+        `${options.target.startTime}`,
+        "-t",
+        `${options.target.durationSeconds}`,
+        "-i",
+        stagedSourceAsset.localFilePath,
+        "-vf",
+        animationFilter,
+        "-loop",
+        "0",
+        "-an",
+        "-c:v",
+        "libwebp",
+        "-quality",
+        `${quality}`,
+        outputFilePath,
+      ]);
+    }
+
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildAnimationExportOutputName(sourceAsset, options),
+      mimeType: getAnimationExportMimeType(options.target.format),
     });
 
     await reportProgress(onProgress, 100);

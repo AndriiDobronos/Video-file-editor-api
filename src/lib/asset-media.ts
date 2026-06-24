@@ -2,6 +2,7 @@ import path from "node:path";
 import type { MediaMetadata } from "../types.js";
 
 export type SupportedImageFormat = "png" | "jpeg" | "webp";
+export type PreviewImageFormat = SupportedImageFormat | "gif";
 
 const imageMimeTypeToFormatMap: Record<string, SupportedImageFormat> = {
   "image/png": "png",
@@ -16,6 +17,16 @@ const imageExtensionToFormatMap: Record<string, SupportedImageFormat> = {
   ".jpg": "jpeg",
   ".webp": "webp",
 };
+
+const previewImageMimeTypeSet = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+]);
+
+const previewImageExtensionSet = new Set([".png", ".jpeg", ".jpg", ".webp", ".gif"]);
 
 export function buildAssetThumbnailUrl(assetId: string) {
   return `/api/v1/assets/${assetId}/thumbnail`;
@@ -47,6 +58,20 @@ export function isSupportedImageAssetLike(input: {
   return Boolean(resolveSupportedImageFormat(input));
 }
 
+export function isPreviewImageAssetLike(input: {
+  mimeType?: string | null;
+  fileName?: string | null;
+}) {
+  const normalizedMimeType = input.mimeType?.toLowerCase().trim();
+
+  if (normalizedMimeType && previewImageMimeTypeSet.has(normalizedMimeType)) {
+    return true;
+  }
+
+  const extension = input.fileName ? path.extname(input.fileName).toLowerCase() : "";
+  return extension ? previewImageExtensionSet.has(extension) : false;
+}
+
 export function isVideoAssetLike(input: {
   mimeType?: string | null;
 }) {
@@ -60,7 +85,7 @@ export function isPreviewableAsset(input: {
 }) {
   return Boolean(
     input.metadata?.videoCodec ||
-      resolveSupportedImageFormat({
+      isPreviewImageAssetLike({
         mimeType: input.mimeType,
         fileName: input.fileName,
       }),

@@ -8,6 +8,7 @@ import {
   resolveSupportedImageFormat,
 } from "./asset-media.js";
 import type {
+  AnimationExportJobOptions,
   AudioVolumeJobOptions,
   ChangeSpeedJobOptions,
   CompressVideoJobOptions,
@@ -130,6 +131,8 @@ const mergeCompatibilityChecks: MergeCompatibilityCheck[] = [
       asset.metadata?.audioChannels ? String(asset.metadata.audioChannels) : "unknown",
   },
 ];
+
+const maxAnimationExportDurationSeconds = 15;
 
 function isVideoStoredAsset(asset: StoredMediaAsset) {
   return Boolean(asset.metadata?.videoCodec) || isVideoAssetLike({ mimeType: asset.mimeType });
@@ -479,6 +482,65 @@ export async function createCompressVideoJob(
       {
         jobId: job.id,
         type: "compress-video",
+        sourceAssetIds: [options.assetId],
+        options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createAnimationExportJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: AnimationExportJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const duration = sourceAsset.metadata?.durationSeconds;
+
+  if (!isVideoStoredAsset(sourceAsset)) {
+    throw new Error("GIF / WebP export currently requires a video source.");
+  }
+
+  if (typeof duration !== "number") {
+    throw new Error("GIF / WebP export requires source duration metadata. Re-upload the clip if needed.");
+  }
+
+  if (options.target.startTime > duration) {
+    throw new Error("Animation export start time cannot be greater than the source duration.");
+  }
+
+  if (options.target.durationSeconds > maxAnimationExportDurationSeconds) {
+    throw new Error(
+      `Animation export duration must stay at or below ${maxAnimationExportDurationSeconds} seconds.`,
+    );
+  }
+
+  if (options.target.startTime + options.target.durationSeconds > duration) {
+    throw new Error("Animation export range cannot extend past the end of the source clip.");
+  }
+
+  const job = createQueuedJobRecord("export-animation", [options.assetId], options);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "export-animation",
+      {
+        jobId: job.id,
+        type: "export-animation",
         sourceAssetIds: [options.assetId],
         options,
       },

@@ -10,6 +10,7 @@ import {
   updateJobProgress,
 } from "./jobs.js";
 import {
+  processAnimationExportJob,
   processAudioVolumeJob,
   processChangeSpeedJob,
   processCompressVideoJob,
@@ -26,6 +27,7 @@ import {
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
 import type {
+  AnimationExportJobOptions,
   AudioVolumeJobOptions,
   ChangeSpeedJobOptions,
   CompressVideoJobOptions,
@@ -116,6 +118,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processCompressVideoJob(
           redis,
           job.data.options as CompressVideoJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "export-animation") {
+        const outputAsset = await processAnimationExportJob(
+          redis,
+          job.data.options as AnimationExportJobOptions,
           reportProgress,
         );
 

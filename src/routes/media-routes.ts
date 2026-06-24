@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 import {
+  ensureAssetMetadataInspection,
   deleteAsset,
   ensureAssetThumbnail,
   getAssetDto,
@@ -14,6 +15,7 @@ import {
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  createAnimationExportJob,
   createAudioVolumeJob,
   createChangeSpeedJob,
   createCompressVideoJob,
@@ -103,6 +105,18 @@ const compressVideoJobSchema = z.object({
       "medium",
       "slow",
     ]).optional(),
+  }),
+});
+
+const animationExportJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    format: z.enum(["gif", "webp"]),
+    startTime: z.number().min(0),
+    durationSeconds: z.number().gt(0),
+    width: z.number().int().positive().max(1280).optional(),
+    fps: z.number().int().min(1).max(30).optional(),
+    quality: z.number().int().min(1).max(100).optional(),
   }),
 });
 
@@ -256,6 +270,54 @@ export async function registerMediaRoutes(
     } catch (error) {
       return reply.code(404).send({
         message: error instanceof Error ? error.message : "Asset was not found.",
+      });
+    }
+  });
+
+  app.get("/api/v1/assets/:assetId/metadata", async (request, reply) => {
+    try {
+      const params = request.params as { assetId: string };
+      const asset = await ensureAssetMetadataInspection(deps.redis, params.assetId);
+
+      return {
+        item: {
+          assetId: asset.id,
+          metadata: asset.metadataInspection,
+          summary: asset.metadata,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Asset metadata was not found.";
+      const statusCode = message.includes("was not found") ? 404 : 500;
+
+      return reply.code(statusCode).send({
+        message,
+      });
+    }
+  });
+
+  app.post("/api/v1/assets/:assetId/metadata/refresh", async (request, reply) => {
+    try {
+      const params = request.params as { assetId: string };
+      const asset = await ensureAssetMetadataInspection(deps.redis, params.assetId, {
+        forceRefresh: true,
+      });
+
+      return reply.send({
+        item: {
+          assetId: asset.id,
+          metadata: asset.metadataInspection,
+          summary: asset.metadata,
+        },
+        message: `Metadata for "${asset.originalName}" was refreshed.`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Asset metadata could not be refreshed.";
+      const statusCode = message.includes("was not found") ? 404 : 500;
+
+      return reply.code(statusCode).send({
+        message,
       });
     }
   });
@@ -557,6 +619,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Compress video job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/export-animation", async (request, reply) => {
+    const parsedBody = animationExportJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Animation export payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createAnimationExportJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Animation export job could not be queued.",
       });
     }
   });

@@ -8,7 +8,7 @@ import type { Redis } from "ioredis";
 import { serverConfig } from "../config.js";
 import type { MediaAssetDto, MediaStorageDriver, StoredMediaAsset } from "../types.js";
 import { buildAssetThumbnailUrl, isPreviewableAsset } from "./asset-media.js";
-import { generateThumbnailPreview, probeMedia } from "./media.js";
+import { generateThumbnailPreview, inspectMedia, summarizeMediaInspection } from "./media.js";
 import {
   buildObjectStorageKey,
   buildThumbnailStorageKey,
@@ -137,7 +137,8 @@ async function persistStoredAsset(input: {
   originalName: string;
   storedName: string;
 }) {
-  const metadata = await probeMedia(input.localFilePath);
+  const metadataInspection = await inspectMedia(input.localFilePath);
+  const metadata = summarizeMediaInspection(metadataInspection);
   const fileStats = await stat(input.localFilePath);
   const storageDriver = getMediaStorageDriver();
   const storageKey = buildObjectStorageKey(input.kind, input.storedName);
@@ -175,6 +176,7 @@ async function persistStoredAsset(input: {
     downloadUrl: "",
     thumbnailUrl: null,
     metadata,
+    metadataInspection,
   };
 
   asset.downloadUrl = `/api/v1/assets/${asset.id}/download`;
@@ -266,6 +268,64 @@ export async function getAssetOrThrow(redis: Redis, assetId: string) {
   }
 
   return asset;
+}
+
+async function stageStoredAssetSourceFile(
+  asset: StoredMediaAsset,
+  prefix: string,
+) {
+  const stagedOriginalFilePath =
+    asset.storageDriver === "local"
+      ? asset.filePath
+      : buildTemporaryWorkingFilePath(prefix, asset.storedName);
+
+  if (!stagedOriginalFilePath) {
+    throw new Error(`Asset "${asset.id}" is missing its local file path.`);
+  }
+
+  if (asset.storageDriver === "r2") {
+    await downloadR2ObjectToLocalFile({
+      objectKey: asset.storageKey,
+      localFilePath: stagedOriginalFilePath,
+    });
+  }
+
+  return stagedOriginalFilePath;
+}
+
+export async function ensureAssetMetadataInspection(
+  redis: Redis,
+  assetId: string,
+  options: {
+    forceRefresh?: boolean;
+  } = {},
+): Promise<StoredMediaAsset> {
+  const asset = await getAssetOrThrow(redis, assetId);
+
+  if (!options.forceRefresh && asset.metadataInspection) {
+    return asset;
+  }
+
+  const stagedOriginalFilePath = await stageStoredAssetSourceFile(
+    asset,
+    options.forceRefresh ? "asset-metadata-refresh" : "asset-metadata-inspect",
+  );
+
+  try {
+    const metadataInspection = await inspectMedia(stagedOriginalFilePath);
+    const nextAsset: StoredMediaAsset = {
+      ...asset,
+      metadata: summarizeMediaInspection(metadataInspection),
+      metadataInspection,
+    };
+
+    await setJsonRecord(redis, getAssetRecordKey(asset.id), nextAsset);
+    return nextAsset;
+  } finally {
+    if (asset.storageDriver === "r2") {
+      await cleanupTemporaryFile(stagedOriginalFilePath);
+    }
+  }
 }
 
 export async function ensureAssetThumbnail(
