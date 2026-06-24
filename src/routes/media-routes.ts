@@ -20,6 +20,7 @@ import {
   createExtractFrameJob,
   createMergeJob,
   createNormalizeJob,
+  createOverlayTextJob,
   createTrimJob,
   getJobDto,
   listJobDtos,
@@ -102,6 +103,20 @@ const extractFrameJobSchema = z.object({
     height: z.number().int().positive().optional(),
     fit: z.enum(["contain", "cover", "stretch"]).optional(),
     background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  }),
+});
+
+const overlayTextJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    text: z.string().min(1),
+    startTime: z.number().min(0).optional(),
+    endTime: z.number().gt(0).optional(),
+    fontSize: z.number().int().positive().max(512).optional(),
+    fontColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    backgroundColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    horizontal: z.enum(["left", "center", "right"]).optional(),
+    vertical: z.enum(["top", "center", "bottom"]).optional(),
   }),
 });
 
@@ -470,6 +485,30 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Extract frame job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/overlay-text", async (request, reply) => {
+    const parsedBody = overlayTextJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Text overlay payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createOverlayTextJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error ? error.message : "Text overlay job could not be queued.",
       });
     }
   });

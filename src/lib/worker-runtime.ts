@@ -16,6 +16,7 @@ import {
   processExtractFrameJob,
   processMergeJob,
   processNormalizeJob,
+  processOverlayTextJob,
   processTrimJob,
 } from "./media.js";
 import { createVideoProcessingWorker } from "./video-processing-queue.js";
@@ -27,6 +28,7 @@ import type {
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
+  OverlayTextJobOptions,
   QueueJobResult,
   TrimJobOptions,
 } from "../types.js";
@@ -104,6 +106,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processExtractFrameJob(
           redis,
           job.data.options as ExtractFrameJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "overlay-text") {
+        const outputAsset = await processOverlayTextJob(
+          redis,
+          job.data.options as OverlayTextJobOptions,
           reportProgress,
         );
 

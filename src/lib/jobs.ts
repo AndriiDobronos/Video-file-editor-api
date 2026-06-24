@@ -15,6 +15,7 @@ import type {
   JobProgress,
   MergeJobOptions,
   NormalizeJobOptions,
+  OverlayTextJobOptions,
   ProcessingJob,
   QueueJobData,
   QueueJobResult,
@@ -392,6 +393,84 @@ export async function createExtractFrameJob(
         type: "extract-frame",
         sourceAssetIds: [options.assetId],
         options,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createOverlayTextJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: OverlayTextJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const duration = sourceAsset.metadata?.durationSeconds;
+  const overlayText = options.target.text.trim();
+
+  if (!sourceAsset.metadata?.videoCodec) {
+    throw new Error("Text overlay currently requires a video asset with a video stream.");
+  }
+
+  if (!overlayText) {
+    throw new Error("Text overlay requires some text before queueing the job.");
+  }
+
+  if (
+    typeof options.target.startTime === "number" &&
+    typeof duration === "number" &&
+    options.target.startTime > duration
+  ) {
+    throw new Error("Text overlay start time cannot be greater than the source duration.");
+  }
+
+  if (
+    typeof options.target.endTime === "number" &&
+    typeof duration === "number" &&
+    options.target.endTime > duration
+  ) {
+    throw new Error("Text overlay end time cannot be greater than the source duration.");
+  }
+
+  if (
+    typeof options.target.startTime === "number" &&
+    typeof options.target.endTime === "number" &&
+    options.target.endTime <= options.target.startTime
+  ) {
+    throw new Error("Text overlay end time must be greater than the start time.");
+  }
+
+  const jobOptions: OverlayTextJobOptions = {
+    ...options,
+    target: {
+      ...options.target,
+      text: overlayText,
+    },
+  };
+
+  const job = createQueuedJobRecord("overlay-text", [options.assetId], jobOptions);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "overlay-text",
+      {
+        jobId: job.id,
+        type: "overlay-text",
+        sourceAssetIds: [options.assetId],
+        options: jobOptions,
       },
       {
         jobId: job.id,

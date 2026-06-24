@@ -7,6 +7,7 @@ export type JobType =
   | "normalize"
   | "compress-video"
   | "extract-frame"
+  | "overlay-text"
   | "crop-pad"
   | "convert-image";
 
@@ -116,6 +117,8 @@ export type ConvertImageFit = "contain" | "cover" | "stretch";
 export type CropPadMode = "crop" | "pad";
 export type CropPadAnchorX = "left" | "center" | "right";
 export type CropPadAnchorY = "top" | "center" | "bottom";
+export type TextOverlayHorizontal = "left" | "center" | "right";
+export type TextOverlayVertical = "top" | "center" | "bottom";
 
 export type ConvertImageTarget = {
   format: ConvertImageFormat;
@@ -144,6 +147,22 @@ export type ExtractFrameTarget = {
 export type ExtractFrameJobOptions = {
   assetId: string;
   target: ExtractFrameTarget;
+};
+
+export type TextOverlayTarget = {
+  text: string;
+  startTime?: number;
+  endTime?: number;
+  fontSize?: number;
+  fontColor?: string;
+  backgroundColor?: string;
+  horizontal?: TextOverlayHorizontal;
+  vertical?: TextOverlayVertical;
+};
+
+export type OverlayTextJobOptions = {
+  assetId: string;
+  target: TextOverlayTarget;
 };
 
 export type CropPadTarget = {
@@ -179,6 +198,7 @@ export type ProcessingJob = {
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions
+    | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
 };
@@ -193,6 +213,7 @@ export type QueueJobData = {
     | NormalizeJobOptions
     | CompressVideoJobOptions
     | ExtractFrameJobOptions
+    | OverlayTextJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
 };

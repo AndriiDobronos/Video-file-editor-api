@@ -23,7 +23,11 @@ import type {
   MediaMetadata,
   MergeJobOptions,
   NormalizeJobOptions,
+  OverlayTextJobOptions,
   StoredMediaAsset,
+  TextOverlayHorizontal,
+  TextOverlayTarget,
+  TextOverlayVertical,
   TrimJobOptions,
   VideoCompressionEncoderPreset,
   VideoCompressionPreset,
@@ -238,6 +242,12 @@ function buildExtractFrameOutputName(
   return `${baseName}-frame-${timestampLabel}${getTargetImageExtension(options.target.format)}`;
 }
 
+function buildTextOverlayOutputName(sourceAsset: StoredMediaAsset) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "text-overlay";
+  return `${baseName}-text-overlay.mp4`;
+}
+
 type StillImageTargetInput = {
   format: ConvertImageFormat;
   quality?: number;
@@ -350,6 +360,87 @@ function appendStillImageEncodingArgs(
   if (target.format === "webp") {
     ffmpegArgs.push("-c:v", "libwebp", "-quality", `${quality}`);
   }
+}
+
+function escapeDrawtextFilePath(filePath: string) {
+  return toForwardSlashPath(filePath)
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\\\'");
+}
+
+function getTextOverlayPositionX(position: TextOverlayHorizontal | undefined) {
+  if (position === "left") {
+    return "40";
+  }
+
+  if (position === "right") {
+    return "w-text_w-40";
+  }
+
+  return "(w-text_w)/2";
+}
+
+function getTextOverlayPositionY(position: TextOverlayVertical | undefined) {
+  if (position === "top") {
+    return "40";
+  }
+
+  if (position === "center") {
+    return "(h-text_h)/2";
+  }
+
+  return "h-text_h-40";
+}
+
+function getTextOverlayColor(
+  color: string | undefined,
+  fallback: string,
+) {
+  return `0x${(color ?? fallback).replace(/^#/, "")}`;
+}
+
+function buildTextOverlayEnableExpression(target: TextOverlayTarget) {
+  if (
+    typeof target.startTime === "number" &&
+    typeof target.endTime === "number"
+  ) {
+    return `between(t,${target.startTime},${target.endTime})`;
+  }
+
+  if (typeof target.startTime === "number") {
+    return `gte(t,${target.startTime})`;
+  }
+
+  if (typeof target.endTime === "number") {
+    return `lte(t,${target.endTime})`;
+  }
+
+  return null;
+}
+
+function buildTextOverlayFilter(input: {
+  textFilePath: string;
+  target: TextOverlayTarget;
+}) {
+  const enableExpression = buildTextOverlayEnableExpression(input.target);
+  const filterParts = [
+    "drawtext",
+    `textfile='${escapeDrawtextFilePath(input.textFilePath)}'`,
+    "reload=0",
+    `fontsize=${Math.max(12, Math.round(input.target.fontSize ?? 42))}`,
+    `fontcolor=${getTextOverlayColor(input.target.fontColor, "#ffffff")}`,
+    "box=1",
+    `boxcolor=${getTextOverlayColor(input.target.backgroundColor, "#111111")}@0.72`,
+    "boxborderw=18",
+    `x=${getTextOverlayPositionX(input.target.horizontal)}`,
+    `y=${getTextOverlayPositionY(input.target.vertical)}`,
+  ];
+
+  if (enableExpression) {
+    filterParts.push(`enable='${enableExpression}'`);
+  }
+
+  return filterParts.join(":");
 }
 
 function getCropOffsetExpression(
@@ -725,6 +816,78 @@ export async function processExtractFrameJob(
     await cleanupTemporaryFile(
       stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
     );
+  }
+}
+
+export async function processOverlayTextJob(
+  redis: Redis,
+  options: OverlayTextJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+  const outputFilePath = buildOutputFilePath("text-overlay");
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "text-overlay-sources",
+  );
+  const textFilePath = path.join(
+    serverConfig.tempDir,
+    `text-overlay-${randomUUID()}.txt`,
+  );
+  const filter = buildTextOverlayFilter({
+    textFilePath,
+    target: options.target,
+  });
+
+  await ensureStorageDirectories();
+  await writeFile(textFilePath, options.target.text, "utf8");
+  await reportProgress(onProgress, 10);
+
+  try {
+    await runCommand("ffmpeg", [
+      "-y",
+      "-i",
+      stagedSourceAsset.localFilePath,
+      "-vf",
+      filter,
+      "-map",
+      "0:v:0?",
+      "-map",
+      "0:a:0?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-movflags",
+      "+faststart",
+      outputFilePath,
+    ]);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildTextOverlayOutputName(sourceAsset),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await Promise.all([
+      unlink(textFilePath).catch(() => undefined),
+      cleanupTemporaryFile(
+        stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+      ),
+    ]);
   }
 }
 
