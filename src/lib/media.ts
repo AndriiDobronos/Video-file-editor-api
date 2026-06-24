@@ -392,11 +392,87 @@ function getTextOverlayPositionY(position: TextOverlayVertical | undefined) {
   return "h-text_h-40";
 }
 
-function getTextOverlayColor(
+function clampColorChannel(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function clampUnitInterval(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function formatTextOverlayAlpha(value: number) {
+  return clampUnitInterval(value)
+    .toFixed(3)
+    .replace(/\.?0+$/, "");
+}
+
+function parseTextOverlayColor(color: string | undefined, fallback: string) {
+  const resolvedColor = (color ?? fallback).trim();
+
+  if (/^transparent$/i.test(resolvedColor)) {
+    return {
+      hex: "0x000000",
+      alpha: 0,
+    };
+  }
+
+  const hexMatch = resolvedColor.match(/^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/);
+
+  if (hexMatch) {
+    return {
+      hex: `0x${hexMatch[1]}`,
+      alpha: hexMatch[2] ? clampUnitInterval(parseInt(hexMatch[2], 16) / 255) : 1,
+    };
+  }
+
+  const rgbMatch = resolvedColor.match(
+    /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i,
+  );
+
+  if (rgbMatch) {
+    const [, red, green, blue] = rgbMatch;
+    return {
+      hex: `0x${[red, green, blue]
+        .map((channel) =>
+          clampColorChannel(Number(channel)).toString(16).padStart(2, "0").toUpperCase(),
+        )
+        .join("")}`,
+      alpha: 1,
+    };
+  }
+
+  const rgbaMatch = resolvedColor.match(
+    /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*((?:0|1(?:\.0+)?|0?\.\d+))\s*\)$/i,
+  );
+
+  if (rgbaMatch) {
+    const [, red, green, blue, alphaValue] = rgbaMatch;
+    return {
+      hex: `0x${[red, green, blue]
+        .map((channel) =>
+          clampColorChannel(Number(channel)).toString(16).padStart(2, "0").toUpperCase(),
+        )
+        .join("")}`,
+      alpha: clampUnitInterval(Number(alphaValue)),
+    };
+  }
+
+  throw new Error(
+    `Unsupported text overlay color "${resolvedColor}". Use hex, hex with alpha, rgb(), rgba(), or transparent.`,
+  );
+}
+
+function formatTextOverlayColor(
   color: string | undefined,
   fallback: string,
 ) {
-  return `0x${(color ?? fallback).replace(/^#/, "")}`;
+  const parsedColor = parseTextOverlayColor(color, fallback);
+
+  if (parsedColor.alpha >= 1) {
+    return parsedColor.hex;
+  }
+
+  return `${parsedColor.hex}@${formatTextOverlayAlpha(parsedColor.alpha)}`;
 }
 
 function buildTextOverlayEnableExpression(target: TextOverlayTarget) {
@@ -427,9 +503,12 @@ function buildTextOverlayFilter(input: {
     `textfile='${escapeDrawtextFilePath(input.textFilePath)}'`,
     "reload=0",
     `fontsize=${Math.max(12, Math.round(input.target.fontSize ?? 42))}`,
-    `fontcolor=${getTextOverlayColor(input.target.fontColor, "#ffffff")}`,
+    `fontcolor=${formatTextOverlayColor(input.target.fontColor, "#ffffff")}`,
     "box=1",
-    `boxcolor=${getTextOverlayColor(input.target.backgroundColor, "#111111")}@0.72`,
+    `boxcolor=${formatTextOverlayColor(
+      input.target.backgroundColor,
+      "rgba(17, 17, 17, 0.72)",
+    )}`,
     "boxborderw=18",
     `x=${getTextOverlayPositionX(input.target.horizontal)}`,
     `y=${getTextOverlayPositionY(input.target.vertical)}`,

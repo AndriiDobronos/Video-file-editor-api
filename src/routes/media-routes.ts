@@ -32,6 +32,17 @@ import {
 import { toAssetDto } from "../lib/serializers.js";
 import type { QueueJobData, QueueJobResult } from "../types.js";
 
+const textOverlayColorSchema = z.string().refine(
+  (value) =>
+    /^(transparent|#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?|rgb\(\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*\)|rgba\(\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:0|1(?:\.0+)?|0?\.\d+)\s*\))$/i.test(
+      value.trim(),
+    ),
+  {
+    message:
+      "Use a supported color format such as #ffffff, #ffffffcc, rgb(255, 255, 255), rgba(17, 17, 17, 0.72), or transparent.",
+  },
+);
+
 const trimJobSchema = z.object({
   assetId: z.string().min(1),
   startTime: z.number().min(0),
@@ -113,8 +124,8 @@ const overlayTextJobSchema = z.object({
     startTime: z.number().min(0).optional(),
     endTime: z.number().gt(0).optional(),
     fontSize: z.number().int().positive().max(512).optional(),
-    fontColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
-    backgroundColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    fontColor: textOverlayColorSchema.optional(),
+    backgroundColor: textOverlayColorSchema.optional(),
     horizontal: z.enum(["left", "center", "right"]).optional(),
     vertical: z.enum(["top", "center", "bottom"]).optional(),
   }),
