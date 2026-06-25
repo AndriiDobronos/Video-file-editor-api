@@ -14,7 +14,10 @@ export const serverConfig = {
   tempDir: path.join(storageRoot, "temp"),
   defaultPort: 4001,
   defaultHost: "0.0.0.0",
-  defaultCorsOrigin: "http://localhost:3000",
+  defaultCorsOrigins: [
+    "http://localhost:3000",
+    "https://video-file-editor-web.vercel.app",
+  ],
   redis: {
     host: "127.0.0.1",
     port: 6379,

@@ -11,9 +11,13 @@ import { startVideoProcessingWorker } from "./lib/worker-runtime.js";
 
 const port = Number(process.env.PORT ?? serverConfig.defaultPort);
 const host = process.env.HOST ?? serverConfig.defaultHost;
-const corsOrigin = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(",").map((value) => value.trim()).filter(Boolean)
-  : serverConfig.defaultCorsOrigin;
+const envCorsOrigins = (process.env.CORS_ORIGIN ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const corsOrigin = Array.from(
+  new Set([...serverConfig.defaultCorsOrigins, ...envCorsOrigins]),
+);
 const workerMode =
   (process.env.EMBED_WORKER ?? "").toLowerCase() === "true" ? "embedded" : "external";
 const redis = createRedisClient("api");
