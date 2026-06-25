@@ -15,6 +15,7 @@ import {
   saveIncomingUpload,
 } from "../lib/filesystem.js";
 import {
+  clearFailedJobHistory,
   createAnimationExportJob,
   createAudioVolumeJob,
   createChangeSpeedJob,
@@ -27,8 +28,10 @@ import {
   createMergeJob,
   createNormalizeJob,
   createOverlayTextJob,
+  createSubtitleBurnInJob,
   createTransitionMergeJob,
   createTrimJob,
+  deleteJobHistory,
   getJobDto,
   listJobDtos,
 } from "../lib/jobs.js";
@@ -223,6 +226,19 @@ const overlayTextJobSchema = z.object({
     backgroundColor: textOverlayColorSchema.optional(),
     horizontal: z.enum(["left", "center", "right"]).optional(),
     vertical: z.enum(["top", "center", "bottom"]).optional(),
+  }),
+});
+
+const subtitleBurnInJobSchema = z.object({
+  assetId: z.string().min(1),
+  target: z.object({
+    subtitleFileName: z.string().trim().min(1),
+    subtitleContent: z.string().trim().min(1),
+    fontSize: z.number().int().positive().max(512).optional(),
+    fontColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    outlineColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    alignment: z.enum(["bottom-center", "bottom-left", "bottom-right", "top-center"]).optional(),
+    marginVertical: z.number().int().min(0).max(400).optional(),
   }),
 });
 
@@ -497,6 +513,51 @@ export async function registerMediaRoutes(
     } catch (error) {
       return reply.code(404).send({
         message: error instanceof Error ? error.message : "Job was not found.",
+      });
+    }
+  });
+
+  app.delete("/api/v1/jobs/:jobId", async (request, reply) => {
+    try {
+      const params = request.params as { jobId: string };
+      const job = await deleteJobHistory(deps.redis, deps.queue, params.jobId);
+
+      return reply.send({
+        item: job,
+        message: `Job ${job.id.slice(0, 8)} was removed from queue history.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Job could not be deleted.";
+      const statusCode = message.includes("was not found")
+        ? 404
+        : message.includes("Only completed or failed jobs")
+          ? 400
+          : 500;
+
+      return reply.code(statusCode).send({
+        message,
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/clear-failed", async (_request, reply) => {
+    try {
+      const result = await clearFailedJobHistory(deps.redis, deps.queue);
+
+      return reply.send({
+        deletedCount: result.deletedCount,
+        items: result.deletedJobs,
+        message:
+          result.deletedCount > 0
+            ? `Removed ${result.deletedCount} failed job${result.deletedCount === 1 ? "" : "s"} from queue history.`
+            : "There were no failed jobs to remove.",
+      });
+    } catch (error) {
+      return reply.code(500).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Failed queue history could not be cleared.",
       });
     }
   });
@@ -811,6 +872,32 @@ export async function registerMediaRoutes(
       return reply.code(400).send({
         message:
           error instanceof Error ? error.message : "Text overlay job could not be queued.",
+      });
+    }
+  });
+
+  app.post("/api/v1/jobs/subtitle-burn-in", async (request, reply) => {
+    const parsedBody = subtitleBurnInJobSchema.safeParse(request.body);
+
+    if (!parsedBody.success) {
+      return reply.code(400).send({
+        message: "Subtitle burn-in payload is invalid.",
+        issues: parsedBody.error.flatten(),
+      });
+    }
+
+    try {
+      const job = await createSubtitleBurnInJob(deps.redis, deps.queue, parsedBody.data);
+
+      return reply.code(202).send({
+        item: job,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Subtitle burn-in job could not be queued.",
       });
     }
   });

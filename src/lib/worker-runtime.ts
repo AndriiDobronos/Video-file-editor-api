@@ -22,6 +22,7 @@ import {
   processMergeJob,
   processNormalizeJob,
   processOverlayTextJob,
+  processSubtitleBurnInJob,
   processTransitionMergeJob,
   processTrimJob,
 } from "./media.js";
@@ -41,6 +42,7 @@ import type {
   NormalizeJobOptions,
   OverlayTextJobOptions,
   QueueJobResult,
+  SubtitleBurnInJobOptions,
   TransitionMergeJobOptions,
   TrimJobOptions,
 } from "../types.js";
@@ -209,6 +211,19 @@ export async function startVideoProcessingWorker(options: StartWorkerOptions = {
         const outputAsset = await processOverlayTextJob(
           redis,
           job.data.options as OverlayTextJobOptions,
+          reportProgress,
+        );
+
+        return {
+          outputAssetId: outputAsset.id,
+          downloadUrl: outputAsset.downloadUrl,
+        };
+      }
+
+      if (job.name === "subtitle-burn-in") {
+        const outputAsset = await processSubtitleBurnInJob(
+          redis,
+          job.data.options as SubtitleBurnInJobOptions,
           reportProgress,
         );
 

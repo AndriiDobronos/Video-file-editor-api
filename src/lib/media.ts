@@ -35,6 +35,9 @@ import type {
   OverlayTextJobOptions,
   PlaybackSpeedTarget,
   AudioVolumeTarget,
+  SubtitleBurnInAlignment,
+  SubtitleBurnInJobOptions,
+  SubtitleBurnInTarget,
   StoredMediaAsset,
   TextOverlayHorizontal,
   TextOverlayTarget,
@@ -502,6 +505,18 @@ function buildTextOverlayOutputName(sourceAsset: StoredMediaAsset) {
   return `${baseName}-text-overlay.mp4`;
 }
 
+function buildSubtitleBurnInOutputName(
+  sourceAsset: StoredMediaAsset,
+  subtitleFileName: string,
+) {
+  const extension = path.extname(sourceAsset.originalName);
+  const baseName = path.basename(sourceAsset.originalName, extension) || "subtitled-video";
+  const subtitleBaseName =
+    path.basename(subtitleFileName, path.extname(subtitleFileName)).trim() || "subtitles";
+
+  return `${baseName}-${subtitleBaseName}-subtitled.mp4`;
+}
+
 function parseFrameRateValue(frameRate: string | null | undefined) {
   if (!frameRate) {
     return null;
@@ -869,6 +884,59 @@ function buildTextOverlayFilter(input: {
   }
 
   return `drawtext=${filterOptions.join(":")}`;
+}
+
+function getSubtitleAlignmentCode(alignment: SubtitleBurnInAlignment | undefined) {
+  switch (alignment) {
+    case "bottom-left":
+      return 1;
+    case "bottom-right":
+      return 3;
+    case "top-center":
+      return 8;
+    default:
+      return 2;
+  }
+}
+
+function formatSubtitleAssColor(color: string | undefined, fallback: string) {
+  const resolvedColor = (color ?? fallback).trim();
+  const match = resolvedColor.match(/^#([0-9a-fA-F]{6})$/);
+
+  if (!match) {
+    throw new Error(
+      `Unsupported subtitle color "${resolvedColor}". Use a six-digit hex value such as #ffffff.`,
+    );
+  }
+
+  const rgb = match[1].toUpperCase();
+  const red = rgb.slice(0, 2);
+  const green = rgb.slice(2, 4);
+  const blue = rgb.slice(4, 6);
+
+  return `&H00${blue}${green}${red}`;
+}
+
+function buildSubtitleBurnInFilter(input: {
+  subtitleFilePath: string;
+  target: SubtitleBurnInTarget;
+}) {
+  const fontSize = Math.max(14, Math.round(input.target.fontSize ?? 34));
+  const marginVertical = Math.max(0, Math.round(input.target.marginVertical ?? 40));
+  const forceStyle = [
+    `Fontsize=${fontSize}`,
+    `PrimaryColour=${formatSubtitleAssColor(input.target.fontColor, "#FFFFFF")}`,
+    `OutlineColour=${formatSubtitleAssColor(input.target.outlineColor, "#111111")}`,
+    "BorderStyle=1",
+    "Outline=2",
+    "Shadow=0",
+    `Alignment=${getSubtitleAlignmentCode(input.target.alignment)}`,
+    `MarginV=${marginVertical}`,
+    "MarginL=36",
+    "MarginR=36",
+  ].join(",");
+
+  return `subtitles='${escapeDrawtextFilePath(input.subtitleFilePath)}':charenc=UTF-8:force_style='${forceStyle}'`;
 }
 
 function getCropOffsetExpression(
@@ -1721,6 +1789,87 @@ export async function processOverlayTextJob(
   } finally {
     await Promise.all([
       unlink(textFilePath).catch(() => undefined),
+      cleanupTemporaryFile(
+        stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
+      ),
+    ]);
+  }
+}
+
+export async function processSubtitleBurnInJob(
+  redis: Redis,
+  options: SubtitleBurnInJobOptions,
+  onProgress?: (progress: JobProgress) => Promise<void>,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!isVideoStoredAsset(sourceAsset)) {
+    throw new Error("Subtitle burn-in currently works with video clips only.");
+  }
+
+  const outputFilePath = buildOutputFilePath("subtitle-burn-in");
+  const stagedSourceAsset = await stageAssetForProcessing(
+    sourceAsset,
+    "subtitle-burn-in-sources",
+  );
+  const subtitleFilePath = path.join(
+    serverConfig.tempDir,
+    `subtitle-burn-in-${randomUUID()}.srt`,
+  );
+  const filter = buildSubtitleBurnInFilter({
+    subtitleFilePath,
+    target: options.target,
+  });
+  const subtitleContent = options.target.subtitleContent.replace(/\r\n/g, "\n").trim();
+
+  await ensureStorageDirectories();
+  await writeFile(subtitleFilePath, `${subtitleContent}\n`, "utf8");
+  await reportProgress(onProgress, 10);
+
+  try {
+    await runCommand("ffmpeg", [
+      "-y",
+      "-i",
+      stagedSourceAsset.localFilePath,
+      "-vf",
+      filter,
+      "-map",
+      "0:v:0?",
+      "-map",
+      "0:a:0?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-movflags",
+      "+faststart",
+      outputFilePath,
+    ]);
+    await reportProgress(onProgress, 85);
+
+    const outputAsset = await registerOutputAsset(redis, {
+      filePath: outputFilePath,
+      originalName: buildSubtitleBurnInOutputName(
+        sourceAsset,
+        options.target.subtitleFileName,
+      ),
+    });
+
+    await reportProgress(onProgress, 100);
+
+    return outputAsset;
+  } catch (error) {
+    await cleanupTemporaryFile(outputFilePath);
+    throw error;
+  } finally {
+    await Promise.all([
+      unlink(subtitleFilePath).catch(() => undefined),
       cleanupTemporaryFile(
         stagedSourceAsset.shouldCleanup ? stagedSourceAsset.localFilePath : null,
       ),

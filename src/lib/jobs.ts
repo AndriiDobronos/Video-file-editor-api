@@ -24,6 +24,7 @@ import type {
   ProcessingJob,
   QueueJobData,
   QueueJobResult,
+  SubtitleBurnInJobOptions,
   StoredMediaAsset,
   TransitionMergeJobOptions,
   TrimJobOptions,
@@ -47,6 +48,26 @@ async function persistJob(redis: Redis, job: ProcessingJob) {
 
 async function readStoredJob(redis: Redis, jobId: string) {
   return getJsonRecord<ProcessingJob>(redis, getJobRecordKey(jobId));
+}
+
+async function removeStoredJob(redis: Redis, jobId: string) {
+  await Promise.all([
+    redis.del(getJobRecordKey(jobId)),
+    redis.zrem(serverConfig.redisKeys.jobIndex, jobId),
+  ]);
+}
+
+async function removeQueueJobIfPresent(
+  queue: Queue<QueueJobData, QueueJobResult>,
+  jobId: string,
+) {
+  const queueJob = await queue.getJob(jobId);
+
+  if (!queueJob) {
+    return;
+  }
+
+  await queueJob.remove().catch(() => undefined);
 }
 
 async function updateJob(
@@ -267,6 +288,52 @@ export async function getJobDto(redis: Redis, jobId: string) {
   }
 
   return toJobDto(job);
+}
+
+export async function deleteJobHistory(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  jobId: string,
+) {
+  const job = await readStoredJob(redis, jobId);
+
+  if (!job) {
+    throw new Error(`Job "${jobId}" was not found.`);
+  }
+
+  if (job.status === "queued" || job.status === "processing") {
+    throw new Error("Only completed or failed jobs can be removed from queue history.");
+  }
+
+  await Promise.all([removeStoredJob(redis, jobId), removeQueueJobIfPresent(queue, jobId)]);
+
+  return toJobDto(job);
+}
+
+export async function clearFailedJobHistory(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+) {
+  const jobIds = await redis.zrevrange(serverConfig.redisKeys.jobIndex, 0, -1);
+  const jobs = await getManyJsonRecords<ProcessingJob>(
+    redis,
+    jobIds.map((jobId) => getJobRecordKey(jobId)),
+  );
+  const failedJobs = jobs.filter((job) => job.status === "failed");
+
+  await Promise.all(
+    failedJobs.map((job) =>
+      Promise.all([
+        removeStoredJob(redis, job.id),
+        removeQueueJobIfPresent(queue, job.id),
+      ]),
+    ),
+  );
+
+  return {
+    deletedCount: failedJobs.length,
+    deletedJobs: failedJobs.map((job) => toJobDto(job)),
+  };
 }
 
 export async function createTrimJob(
@@ -923,6 +990,66 @@ export async function createOverlayTextJob(
       {
         jobId: job.id,
         type: "overlay-text",
+        sourceAssetIds: [options.assetId],
+        options: jobOptions,
+      },
+      {
+        jobId: job.id,
+      },
+    );
+  } catch (error) {
+    await markJobFailed(
+      redis,
+      job.id,
+      error instanceof Error ? error.message : "Redis queue enqueue failed.",
+      0,
+    );
+    throw error;
+  }
+
+  return toJobDto(job);
+}
+
+export async function createSubtitleBurnInJob(
+  redis: Redis,
+  queue: Queue<QueueJobData, QueueJobResult>,
+  options: SubtitleBurnInJobOptions,
+) {
+  const sourceAsset = await getAssetOrThrow(redis, options.assetId);
+
+  if (!isVideoStoredAsset(sourceAsset)) {
+    throw new Error("Subtitle burn-in currently works with video clips only.");
+  }
+
+  const subtitleFileName = options.target.subtitleFileName.trim();
+  const subtitleContent = options.target.subtitleContent.trim();
+
+  if (!subtitleFileName) {
+    throw new Error("Subtitle burn-in requires the original .srt file name.");
+  }
+
+  if (!subtitleContent) {
+    throw new Error("Subtitle burn-in requires subtitle content before queueing the job.");
+  }
+
+  const jobOptions: SubtitleBurnInJobOptions = {
+    ...options,
+    target: {
+      ...options.target,
+      subtitleFileName,
+      subtitleContent,
+    },
+  };
+
+  const job = createQueuedJobRecord("subtitle-burn-in", [options.assetId], jobOptions);
+  await persistJob(redis, job);
+
+  try {
+    await queue.add(
+      "subtitle-burn-in",
+      {
+        jobId: job.id,
+        type: "subtitle-burn-in",
         sourceAssetIds: [options.assetId],
         options: jobOptions,
       },

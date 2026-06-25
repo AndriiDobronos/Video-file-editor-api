@@ -14,6 +14,7 @@ export type JobType =
   | "change-speed"
   | "audio-volume"
   | "overlay-text"
+  | "subtitle-burn-in"
   | "crop-pad"
   | "convert-image";
 
@@ -281,6 +282,27 @@ export type OverlayTextJobOptions = {
   target: TextOverlayTarget;
 };
 
+export type SubtitleBurnInAlignment =
+  | "bottom-center"
+  | "bottom-left"
+  | "bottom-right"
+  | "top-center";
+
+export type SubtitleBurnInTarget = {
+  subtitleFileName: string;
+  subtitleContent: string;
+  fontSize?: number;
+  fontColor?: string;
+  outlineColor?: string;
+  alignment?: SubtitleBurnInAlignment;
+  marginVertical?: number;
+};
+
+export type SubtitleBurnInJobOptions = {
+  assetId: string;
+  target: SubtitleBurnInTarget;
+};
+
 export type CropPadTarget = {
   mode: CropPadMode;
   width: number;
@@ -321,6 +343,7 @@ export type ProcessingJob = {
     | ChangeSpeedJobOptions
     | AudioVolumeJobOptions
     | OverlayTextJobOptions
+    | SubtitleBurnInJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
 };
@@ -342,6 +365,7 @@ export type QueueJobData = {
     | ChangeSpeedJobOptions
     | AudioVolumeJobOptions
     | OverlayTextJobOptions
+    | SubtitleBurnInJobOptions
     | CropPadJobOptions
     | ConvertImageJobOptions;
 };
