@@ -15,6 +15,12 @@ services:
         value: r2
       - key: EMBED_WORKER
         value: "true"
+      - key: BULLMQ_WORKER_LOCK_DURATION_MS
+        value: "600000"
+      - key: BULLMQ_WORKER_STALLED_INTERVAL_MS
+        value: "30000"
+      - key: BULLMQ_WORKER_MAX_STALLED_COUNT
+        value: "3"
       - key: REDIS_URL
         fromService:
           type: keyvalue

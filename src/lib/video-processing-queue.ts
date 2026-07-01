@@ -53,6 +53,18 @@ export function createVideoProcessingWorker(
     concurrency: Number(
       process.env.BULLMQ_WORKER_CONCURRENCY ?? serverConfig.queue.workerConcurrency,
     ),
+    lockDuration: Number(
+      process.env.BULLMQ_WORKER_LOCK_DURATION_MS ??
+        serverConfig.queue.workerLockDurationMs,
+    ),
+    stalledInterval: Number(
+      process.env.BULLMQ_WORKER_STALLED_INTERVAL_MS ??
+        serverConfig.queue.workerStalledIntervalMs,
+    ),
+    maxStalledCount: Number(
+      process.env.BULLMQ_WORKER_MAX_STALLED_COUNT ??
+        serverConfig.queue.workerMaxStalledCount,
+    ),
     prefix: process.env.BULLMQ_QUEUE_PREFIX ?? serverConfig.queue.prefix,
   };
 

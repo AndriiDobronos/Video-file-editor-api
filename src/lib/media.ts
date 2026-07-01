@@ -294,6 +294,98 @@ function buildTrimOutputName(sourceAsset: StoredMediaAsset) {
   return `${baseName}-trimmed.mp4`;
 }
 
+function canUseFastTrimCopy(sourceAsset: StoredMediaAsset, startTime: number) {
+  const normalizedMimeType = sourceAsset.mimeType.toLowerCase().trim();
+  const videoCodec = sourceAsset.metadata?.videoCodec?.toLowerCase().trim() ?? null;
+  const audioCodec = sourceAsset.metadata?.audioCodec?.toLowerCase().trim() ?? null;
+
+  return (
+    startTime <= 0.05 &&
+    (normalizedMimeType === "video/mp4" || normalizedMimeType === "application/octet-stream") &&
+    videoCodec === "h264" &&
+    (audioCodec === null || audioCodec === "aac")
+  );
+}
+
+function isTrimDurationAcceptable(
+  requestedDuration: number,
+  actualDuration: number | null | undefined,
+) {
+  if (actualDuration === null || actualDuration === undefined || Number.isNaN(actualDuration)) {
+    return false;
+  }
+
+  const delta = Math.abs(actualDuration - requestedDuration);
+  return delta <= Math.max(0.35, requestedDuration * 0.2);
+}
+
+async function tryFastTrimCopy(input: {
+  stagedSourceFilePath: string;
+  outputFilePath: string;
+  duration: number;
+}) {
+  await runCommand("ffmpeg", [
+    "-y",
+    "-i",
+    input.stagedSourceFilePath,
+    "-t",
+    `${input.duration}`,
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-c",
+    "copy",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-movflags",
+    "+faststart",
+    input.outputFilePath,
+  ]);
+
+  const outputMetadata = await probeMedia(input.outputFilePath);
+
+  if (!isTrimDurationAcceptable(input.duration, outputMetadata?.durationSeconds)) {
+    throw new Error("Fast trim copy produced an unexpected duration.");
+  }
+}
+
+async function runAccurateTrimEncode(input: {
+  stagedSourceFilePath: string;
+  outputFilePath: string;
+  startTime: number;
+  duration: number;
+}) {
+  await runCommand("ffmpeg", [
+    "-y",
+    "-i",
+    input.stagedSourceFilePath,
+    "-ss",
+    `${input.startTime}`,
+    "-t",
+    `${input.duration}`,
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-fflags",
+    "+genpts",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "23",
+    "-c:a",
+    "aac",
+    "-movflags",
+    "+faststart",
+    input.outputFilePath,
+  ]);
+}
+
 function buildMergeOutputName() {
   return `merged-${new Date().toISOString().replace(/[:.]/g, "-")}.mp4`;
 }
@@ -1026,30 +1118,30 @@ export async function processTrimJob(
   await reportProgress(onProgress, 10);
 
   try {
-    await runCommand("ffmpeg", [
-      "-y",
-      "-ss",
-      `${options.startTime}`,
-      "-i",
-      stagedSourceAsset.localFilePath,
-      "-t",
-      `${duration}`,
-      "-map",
-      "0:v:0?",
-      "-map",
-      "0:a:0?",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-crf",
-      "23",
-      "-c:a",
-      "aac",
-      "-movflags",
-      "+faststart",
-      outputFilePath,
-    ]);
+    let usedFastCopy = false;
+
+    if (canUseFastTrimCopy(sourceAsset, options.startTime)) {
+      try {
+        await tryFastTrimCopy({
+          stagedSourceFilePath: stagedSourceAsset.localFilePath,
+          outputFilePath,
+          duration,
+        });
+        usedFastCopy = true;
+      } catch {
+        await cleanupTemporaryFile(outputFilePath);
+      }
+    }
+
+    if (!usedFastCopy) {
+      await runAccurateTrimEncode({
+        stagedSourceFilePath: stagedSourceAsset.localFilePath,
+        outputFilePath,
+        startTime: options.startTime,
+        duration,
+      });
+    }
+
     await reportProgress(onProgress, 85);
 
     const outputAsset = await registerOutputAsset(redis, {
